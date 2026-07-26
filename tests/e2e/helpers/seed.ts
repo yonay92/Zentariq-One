@@ -97,6 +97,7 @@ const ADMIN_EXCLUDED_PERMISSIONS = new Set([
   'force_archive_study',
   'force_archive_site',
   'reopen_visit',
+  'override_regulatory_status',
 ]);
 
 const BASE_ACCESS_PERMISSIONS = [
@@ -106,6 +107,7 @@ const BASE_ACCESS_PERMISSIONS = [
   'view_visits',
   'view_all_sites',
   'view_leads',
+  'view_regulatory',
 ];
 
 async function findOrCreateRole(

@@ -92,6 +92,20 @@ const NAV_ITEMS: NavItem[] = [
     permission: 'view_leads',
   },
   {
+    label: 'Regulatory',
+    href: '/regulatory',
+    icon: (
+      <svg {...ICON_PROPS}>
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M9 12.75l3 3 7.5-7.5M3 12a9 9 0 1018 0 9 9 0 00-18 0z"
+        />
+      </svg>
+    ),
+    permission: 'view_regulatory',
+  },
+  {
     label: 'Calendar',
     href: '/calendar',
     icon: (

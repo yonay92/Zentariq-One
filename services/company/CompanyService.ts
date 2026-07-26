@@ -165,16 +165,18 @@ export const CompanyService = {
       (roles as Array<{ id: string; key: string }>).map((r) => [r.key, r.id]),
     );
 
-    // force_archive_study / force_archive_site / reopen_visit are deliberate,
-    // per-role overrides a company owner grants manually via Settings > Roles —
-    // giving every admin the "all permissions" default would defeat the point
-    // of that safeguard. view_subject_phi / edit_subject_phi are granted to
-    // Administrator by default (product decision — other roles still require a
-    // conscious per-role grant via Settings > Roles, same override mechanism).
+    // force_archive_study / force_archive_site / reopen_visit / override_regulatory_status
+    // are deliberate, per-role overrides a company owner grants manually via
+    // Settings > Roles — giving every admin the "all permissions" default
+    // would defeat the point of that safeguard. view_subject_phi /
+    // edit_subject_phi are granted to Administrator by default (product
+    // decision — other roles still require a conscious per-role grant via
+    // Settings > Roles, same override mechanism).
     const ADMIN_EXCLUDED_PERMISSIONS = new Set([
       'force_archive_study',
       'force_archive_site',
       'reopen_visit',
+      'override_regulatory_status',
     ]);
     const adminPerms = Array.from(permMap.entries())
       .filter(([key]) => !ADMIN_EXCLUDED_PERMISSIONS.has(key))
@@ -210,6 +212,7 @@ export const CompanyService = {
       'create_lead',
       'edit_lead',
       'convert_lead',
+      'view_staff_credentials',
     ]
       .map((k) => permMap.get(k))
       .filter(Boolean) as string[];
@@ -228,6 +231,10 @@ export const CompanyService = {
       'upload_regulatory_document',
       'edit_regulatory_document',
       'archive_regulatory_document',
+      'manage_regulatory_requirements',
+      'view_staff_credentials',
+      'manage_staff_credentials',
+      'view_regulatory_audit',
       'view_documents',
       'upload_documents',
       'view_tasks',
@@ -241,6 +248,7 @@ export const CompanyService = {
       'view_subjects',
       'view_visits',
       'view_regulatory',
+      'view_staff_credentials',
     ]
       .map((k) => permMap.get(k))
       .filter(Boolean) as string[];
