@@ -1,6 +1,6 @@
 # FINAL_ARCHITECTURE_AUDIT.md
 
-# ClinicalOS — Pre-Sprint 1 Architecture Audit
+# Zentariq One — Pre-Sprint 1 Architecture Audit
 
 Version: 1.0
 Auditor: Lead Software Architect

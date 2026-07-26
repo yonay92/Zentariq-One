@@ -1,12 +1,12 @@
 # SUPABASE_SETUP.md
 
-# ClinicalOS Supabase Setup Specification
+# Zentariq One Supabase Setup Specification
 
 Version: 1.0
 
 ## Purpose
 
-This document defines the complete Supabase configuration required for ClinicalOS.
+This document defines the complete Supabase configuration required for Zentariq One.
 
 Supabase provides:
 

@@ -1,6 +1,6 @@
 # BUSINESS_RULE_ENGINE.md
 
-# ClinicalOS — Business Rule Engine Specification
+# Zentariq One — Business Rule Engine Specification
 
 Version: 1.0
 Status: Production-Ready — Required before Sprint 9
@@ -9,7 +9,7 @@ Status: Production-Ready — Required before Sprint 9
 
 ## 1. Purpose
 
-The Business Rule Engine (BRE) is ClinicalOS's automation backbone. It evaluates stored rules against runtime events and executes the resulting actions. Every module that writes data must pass through the BRE after completing its primary write.
+The Business Rule Engine (BRE) is Zentariq One's automation backbone. It evaluates stored rules against runtime events and executes the resulting actions. Every module that writes data must pass through the BRE after completing its primary write.
 
 This document resolves **GAP-BL-01** from GAP_ANALYSIS.md: it defines the JSONB condition schema, the action schema, the execution model, the invocation contract, and the seed rules that ship with the platform.
 

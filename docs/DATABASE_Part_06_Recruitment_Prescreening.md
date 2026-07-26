@@ -1,11 +1,11 @@
 # DATABASE_Part_06.md
 
-# ClinicalOS Database Architecture — Part 06
+# Zentariq One Database Architecture — Part 06
 
 ## Recruitment & Patient Management
 
 Version: 1.0
-Project: ClinicalOS
+Project: Zentariq One
 
 ---
 

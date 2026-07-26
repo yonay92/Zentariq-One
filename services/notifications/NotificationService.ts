@@ -45,7 +45,7 @@ const DEFAULT_TITLES: Record<NotificationEventType, string> = {
   ai_review_pending: 'AI analysis ready for review: {agent_name}',
   ai_request_failed: 'AI request failed — please retry',
   subject_status_changed: 'Subject {subject_number} status: {new_status}',
-  user_invited: "You've been invited to ClinicalOS",
+  user_invited: "You've been invited to Zentariq One",
   ai_budget_warning: 'AI token budget at {pct}% for this month',
   study_activated: 'Study activated: {study_name}',
   protocol_amendment: 'Protocol amended: {study_name}',
@@ -290,7 +290,7 @@ async function queueEmail(
   if (!profile) return;
 
   const isCriticalOrHigh = priority === 'critical' || priority === 'high';
-  const htmlBody = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto"><p>${body || subject}</p><p style="color:#64748b;font-size:12px">This is an automated notification from ClinicalOS. Priority: ${priority}</p></div>`;
+  const htmlBody = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto"><p>${body || subject}</p><p style="color:#64748b;font-size:12px">This is an automated notification from Zentariq One. Priority: ${priority}</p></div>`;
 
   await supabase.from('notification_email_queue').insert({
     company_id: companyId,

@@ -202,7 +202,7 @@ export function Sidebar() {
   return (
     <aside className="flex min-h-screen w-64 flex-shrink-0 flex-col bg-gray-900">
       <div className="flex h-16 items-center border-b border-gray-800 px-6">
-        <span className="text-lg font-bold tracking-tight text-white">ClinicalOS</span>
+        <span className="text-lg font-bold tracking-tight text-white">Zentariq One</span>
       </div>
 
       <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">

@@ -1,6 +1,6 @@
 # TESTING.md
 
-# ClinicalOS Testing Strategy
+# Zentariq One Testing Strategy
 
 ## Test Types
 

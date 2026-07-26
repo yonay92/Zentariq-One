@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file is the single source of truth for working on ClinicalOS with Claude Code. **Part 1** documents the project itself (what it is, how it's built, how to set it up). **Part 2** is the authoritative engineering policy — mandatory for every development session unless the user explicitly overrides it.
+This file is the single source of truth for working on Zentariq One with Claude Code. **Part 1** documents the project itself (what it is, how it's built, how to set it up). **Part 2** is the authoritative engineering policy — mandatory for every development session unless the user explicitly overrides it.
 
 ## Table of Contents
 
@@ -36,7 +36,7 @@ This file is the single source of truth for working on ClinicalOS with Claude Co
 
 ## Project Overview
 
-ClinicalOS is an enterprise SaaS platform for clinical research operations, combining CTMS, eRegulatory, Business Rules Engine, Clinical Intelligence, Task Center, Enterprise Document Center, and Analytics.
+Zentariq One is an enterprise SaaS platform for clinical research operations, combining CTMS, eRegulatory, Business Rules Engine, Clinical Intelligence, Task Center, Enterprise Document Center, and Analytics.
 
 Full specification lives in `docs/`. Always read the relevant doc before implementing anything — reference it explicitly when making decisions (see [AI Behavior](#ai-behavior)).
 

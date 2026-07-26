@@ -112,7 +112,7 @@ export default function DashboardPage() {
       <div className="rounded-xl border border-gray-200 bg-white p-6">
         <h2 className="mb-4 text-base font-semibold text-gray-900">Recent Activity</h2>
         <p className="text-sm text-gray-500">
-          Activity feed will appear here as you use ClinicalOS.
+          Activity feed will appear here as you use Zentariq One.
         </p>
       </div>
     </div>

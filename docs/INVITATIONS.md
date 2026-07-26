@@ -1,6 +1,6 @@
 # INVITATIONS.md
 
-# ClinicalOS — User Invitation Architecture Specification
+# Zentariq One — User Invitation Architecture Specification
 
 Version: 1.0
 Status: Production-Ready — Required before Sprint 1
@@ -9,7 +9,7 @@ Status: Production-Ready — Required before Sprint 1
 
 ## 1. Purpose
 
-This document defines the complete user invitation system for ClinicalOS. It resolves **GAP-DB-02** from GAP_ANALYSIS.md by specifying the `user_invitations` table, the invitation token lifecycle, the invitation service, the API contract, the acceptance flow, and the Supabase Auth integration.
+This document defines the complete user invitation system for Zentariq One. It resolves **GAP-DB-02** from GAP_ANALYSIS.md by specifying the `user_invitations` table, the invitation token lifecycle, the invitation service, the API contract, the acceptance flow, and the Supabase Auth integration.
 
 ---
 
@@ -106,7 +106,7 @@ export function generateInvitationToken(): string {
 The token is included in the invitation URL:
 
 ```
-https://app.clinicalos.com/accept-invitation?token=<64-char-hex>
+https://app.zentariq-one.com/accept-invitation?token=<64-char-hex>
 ```
 
 ---
@@ -169,7 +169,7 @@ export class InvitationService {
       type: 'user_invited',
       companyId: input.companyId,
       recipientUserId: null, // external email — not an existing user
-      customTitle: 'You have been invited to ClinicalOS',
+      customTitle: 'You have been invited to Zentariq One',
       customBody: this.buildInvitationEmailBody(invitation, token),
       context: { token, email: input.email },
     });
@@ -311,7 +311,7 @@ export class InvitationService {
     await notificationService.dispatch({
       type: 'user_invited',
       companyId: ctx.companyId,
-      customTitle: 'Reminder: Your ClinicalOS invitation is waiting',
+      customTitle: 'Reminder: Your Zentariq One invitation is waiting',
       context: { token, email: existing.email },
     });
 
@@ -329,7 +329,7 @@ export class InvitationService {
   private buildInvitationEmailBody(invitation: UserInvitation, token: string): string {
     const acceptUrl = `${process.env.NEXT_PUBLIC_APP_URL}/accept-invitation?token=${token}`;
     return `
-      You have been invited to join ClinicalOS by a member of your organization.
+      You have been invited to join Zentariq One by a member of your organization.
       Click the link below to set up your account. This link expires in 72 hours.
 
       ${acceptUrl}

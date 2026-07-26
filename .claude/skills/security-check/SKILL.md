@@ -1,6 +1,6 @@
 ---
 name: security-check
-description: Audits a feature or module for ClinicalOS security requirements — RLS policies, company_id/site_id isolation, permission checks, audit trail integration, and AI data access rules. Run before marking any feature complete.
+description: Audits a feature or module for Zentariq One security requirements — RLS policies, company_id/site_id isolation, permission checks, audit trail integration, and AI data access rules. Run before marking any feature complete.
 ---
 
 Perform a security audit on the code you just wrote or on $ARGUMENTS (a specific module, file, or feature name). Check every item in this list and report pass/fail with the specific file and line for any failure.

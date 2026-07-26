@@ -1,12 +1,12 @@
 # BACKEND_SERVICES.md
 
-# ClinicalOS Backend Services Specification
+# Zentariq One Backend Services Specification
 
 Version: 1.0
 
 ## Purpose
 
-This document defines the backend service layer used by ClinicalOS.
+This document defines the backend service layer used by Zentariq One.
 
 Business logic must never live inside React components or API routes.
 

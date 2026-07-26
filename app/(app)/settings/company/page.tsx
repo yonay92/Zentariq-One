@@ -187,7 +187,7 @@ export default function CompanySettingsPage() {
             <div>
               <p className="text-sm font-medium text-gray-900">Clinical Intelligence (AI)</p>
               <p className="text-xs text-gray-500">
-                Enable AI agents and suggestions across ClinicalOS
+                Enable AI agents and suggestions across Zentariq One
               </p>
             </div>
             <button

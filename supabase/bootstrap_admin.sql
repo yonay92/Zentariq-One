@@ -1,7 +1,7 @@
 -- ============================================================
 -- bootstrap_admin.sql
 --
--- One-time bootstrap script for a FRESH ClinicalOS database.
+-- One-time bootstrap script for a FRESH Zentariq One database.
 -- Run manually (e.g. `psql ... -f supabase/bootstrap_admin.sql`)
 -- AFTER migrations 001_companies_sites_users.sql and
 -- 002_roles_permissions.sql have been applied.
@@ -30,8 +30,8 @@
 -- after first login if you run this script with the defaults.
 -- ============================================================
 
-\set company_name 'ClinicalOS'
-\set admin_email 'admin@clinicalos.local'
+\set company_name 'Zentariq Systems'
+\set admin_email 'admin@zentariqsystems.local'
 \set admin_password 'ChangeMe123!'
 \set admin_full_name 'System Administrator'
 

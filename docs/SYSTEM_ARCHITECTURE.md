@@ -1,10 +1,10 @@
 # SYSTEM_ARCHITECTURE.md
 
-# ClinicalOS System Architecture
+# Zentariq One System Architecture
 
 ## Purpose
 
-This document defines the high-level architecture of ClinicalOS. It is
+This document defines the high-level architecture of Zentariq One. It is
 the reference that all developers must follow.
 
 ## Architectural Principles

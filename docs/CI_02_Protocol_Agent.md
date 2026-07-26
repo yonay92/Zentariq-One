@@ -2,7 +2,7 @@
 
 ## Goal
 
-Convert a study protocol into a draft ClinicalOS study.
+Convert a study protocol into a draft Zentariq One study.
 
 ## Inputs
 

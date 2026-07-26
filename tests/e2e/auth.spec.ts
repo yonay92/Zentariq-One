@@ -130,10 +130,10 @@ test.describe('Auth page navigation', () => {
     await expect(page).toHaveURL(/\/forgot-password/);
   });
 
-  test('ClinicalOS heading is present on all auth pages', async ({ page }) => {
+  test('Zentariq One heading is present on all auth pages', async ({ page }) => {
     for (const path of ['/login', '/forgot-password']) {
       await page.goto(path);
-      await expect(page.getByRole('heading', { name: 'ClinicalOS' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Zentariq One' })).toBeVisible();
     }
   });
 });

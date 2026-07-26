@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Persistent assistant available throughout ClinicalOS.
+Persistent assistant available throughout Zentariq One.
 
 ### Capabilities
 

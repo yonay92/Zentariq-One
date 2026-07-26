@@ -13,9 +13,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const CLAUDE_MODEL = 'claude-sonnet-4-6';
 
-const SYSTEM_PROMPT = `You are the ClinicalOS Protocol Agent.
+const SYSTEM_PROMPT = `You are the Zentariq One Protocol Agent.
 
-Goal: convert a clinical trial study protocol into a draft ClinicalOS study.
+Goal: convert a clinical trial study protocol into a draft Zentariq One study.
 
 Inputs: a protocol PDF (and, if provided, amendments or supporting manuals).
 

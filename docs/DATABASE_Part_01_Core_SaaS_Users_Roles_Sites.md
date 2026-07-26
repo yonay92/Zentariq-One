@@ -1,18 +1,18 @@
 # DATABASE_Part_01.md
 
-# ClinicalOS Database Architecture — Part 01
+# Zentariq One Database Architecture — Part 01
 
 ## Core SaaS, Users, Roles, Permissions, Sites
 
 Version: 1.0  
-Project: ClinicalOS  
+Project: Zentariq One  
 Purpose: Define the foundational database tables for multi-company SaaS architecture, authentication mapping, users, roles, permissions, and site access.
 
 ---
 
 ## 1. Database Design Principles
 
-ClinicalOS is designed as a multi-tenant SaaS platform.
+Zentariq One is designed as a multi-tenant SaaS platform.
 
 Every tenant is represented by a `company`.
 
@@ -37,7 +37,7 @@ Security must be enforced at the database level using Supabase Row Level Securit
 
 ## 2. Table: companies
 
-Represents each clinic, research organization, or customer using ClinicalOS.
+Represents each clinic, research organization, or customer using Zentariq One.
 
 ```sql
 companies
@@ -121,7 +121,7 @@ company_modules
 
 ## 5. Table: profiles
 
-Maps Supabase Auth users to ClinicalOS users.
+Maps Supabase Auth users to Zentariq One users.
 
 ```sql
 profiles

@@ -1,11 +1,11 @@
 # DATABASE_Part_03.md
 
-# ClinicalOS Database Architecture — Part 03
+# Zentariq One Database Architecture — Part 03
 
 ## Subjects, Visits, Calendar, Timelines
 
 Version: 1.0  
-Project: ClinicalOS
+Project: Zentariq One
 
 ---
 

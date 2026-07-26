@@ -1,13 +1,13 @@
 # README.md
 
-# ClinicalOS
+# Zentariq One
 
-ClinicalOS is an enterprise SaaS platform designed to manage and
+Zentariq One is an enterprise SaaS platform designed to manage and
 automate clinical research operations.
 
 ## Vision
 
-ClinicalOS is not just a CTMS. It integrates:
+Zentariq One is not just a CTMS. It integrates:
 
 - CTMS
 - eRegulatory
@@ -84,5 +84,5 @@ Data is isolated using company_id and Row Level Security.
 
 ## Guiding Principle
 
-ClinicalOS orchestrates clinical operations through automation,
+Zentariq One orchestrates clinical operations through automation,
 intelligence and standardized workflows.

@@ -1,6 +1,6 @@
 ---
 name: db-migration
-description: Creates a properly structured Supabase SQL migration for ClinicalOS — correct naming, UUID keys, company_id/site_id, RLS policies, indexes, and seed data. Run when adding or altering database tables.
+description: Creates a properly structured Supabase SQL migration for Zentariq One — correct naming, UUID keys, company_id/site_id, RLS policies, indexes, and seed data. Run when adding or altering database tables.
 disable-model-invocation: true
 ---
 
