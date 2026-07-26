@@ -50,8 +50,10 @@ export type PermissionKey =
   | 'view_charts'
   | 'mark_chart_ready'
   | 'mark_chart_entered'
+  | 'view_regulatory'
   | 'upload_regulatory_document'
   | 'edit_regulatory_document'
+  | 'archive_regulatory_document'
   | 'edit_business_rules'
   | 'view_all_sites'
   | 'manage_users'
@@ -70,4 +72,9 @@ export type PermissionKey =
   | 'view_lead_phi'
   | 'edit_lead_phi'
   | 'convert_lead'
-  | 'manage_referral_sources';
+  | 'manage_referral_sources'
+  | 'manage_regulatory_requirements'
+  | 'view_staff_credentials'
+  | 'manage_staff_credentials'
+  | 'view_regulatory_audit'
+  | 'override_regulatory_status';

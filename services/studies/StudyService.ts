@@ -502,6 +502,11 @@ export const StudyService = {
 
     // GAP-BL-05: auto-populate study_document_requirements from document_types.required_by_default.
     // Implemented as a plain synchronous step here — revisit via the Business Rule Engine (Sprint 9).
+    // Existence-checked rather than upserted on a column-list conflict target:
+    // migration 016 (Sprint 6) replaced this table's plain (study_id,
+    // document_type_id) unique constraint with a COALESCE-based expression
+    // index (site_id is now part of the scope), which a plain onConflict
+    // column list can no longer resolve.
     const { data: requiredTypes } = await supabase
       .from('document_types')
       .select('id')
@@ -509,15 +514,31 @@ export const StudyService = {
       .eq('required_by_default', true);
 
     if (requiredTypes && requiredTypes.length > 0) {
-      await supabase.from('study_document_requirements').upsert(
-        (requiredTypes as Array<{ id: string }>).map((t) => ({
-          company_id: ctx.company.id,
-          study_id: studyId,
-          document_type_id: t.id,
-          required: true,
-        })),
-        { onConflict: 'study_id,document_type_id', ignoreDuplicates: true },
+      const { data: existingReqs } = await supabase
+        .from('study_document_requirements')
+        .select('document_type_id')
+        .eq('study_id', studyId)
+        .is('site_id', null);
+
+      const existingTypeIds = new Set(
+        ((existingReqs as Array<{ document_type_id: string }>) ?? []).map(
+          (r) => r.document_type_id,
+        ),
       );
+      const toInsert = (requiredTypes as Array<{ id: string }>).filter(
+        (t) => !existingTypeIds.has(t.id),
+      );
+
+      if (toInsert.length > 0) {
+        await supabase.from('study_document_requirements').insert(
+          toInsert.map((t) => ({
+            company_id: ctx.company.id,
+            study_id: studyId,
+            document_type_id: t.id,
+            required: true,
+          })),
+        );
+      }
     }
 
     await this.notifyAssignedSites(studyId, ctx.company.id, 'study_activated', ['pi', 'crc'], {

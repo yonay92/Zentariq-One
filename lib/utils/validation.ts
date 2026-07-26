@@ -567,4 +567,107 @@ export const overridePrescreeningSchema = z.object({
   manual_override_reason: z.string().min(1, 'A reason is required').max(1000).trim(),
 });
 
+// ── Regulatory: Document Types ──────────────────────────────────────────────
+
+export const createDocumentTypeSchema = z.object({
+  name: z.string().min(1, 'Name is required').max(200).trim(),
+  category: z.string().max(100).trim().optional(),
+  has_expiration: z.boolean().optional(),
+  default_alert_days: z.array(z.number().int().positive()).optional(),
+  requires_version: z.boolean().optional(),
+  required_by_default: z.boolean().optional(),
+});
+
+export type CreateDocumentTypeSchema = z.infer<typeof createDocumentTypeSchema>;
+
+export const updateDocumentTypeSchema = createDocumentTypeSchema.partial();
+
+export type UpdateDocumentTypeSchema = z.infer<typeof updateDocumentTypeSchema>;
+
+// ── Regulatory: Requirements ────────────────────────────────────────────────
+
+export const createRegulatoryRequirementSchema = z
+  .object({
+    document_type_id: z.string().uuid('Invalid document type ID'),
+    study_id: z.string().uuid('Invalid study ID').optional(),
+    site_id: z.string().uuid('Invalid site ID').optional(),
+    required: z.boolean().optional(),
+    expiration_required: z.boolean().optional(),
+  })
+  .refine((v) => !v.expiration_required || v.required !== false, {
+    message: 'A requirement that is not required cannot require expiration tracking',
+    path: ['expiration_required'],
+  });
+
+export type CreateRegulatoryRequirementSchema = z.infer<typeof createRegulatoryRequirementSchema>;
+
+export const updateRegulatoryRequirementSchema = z.object({
+  required: z.boolean().optional(),
+  expiration_required: z.boolean().optional(),
+});
+
+export type UpdateRegulatoryRequirementSchema = z.infer<typeof updateRegulatoryRequirementSchema>;
+
+// ── Regulatory: Documents ───────────────────────────────────────────────────
+
+export const createRegulatoryDocumentSchema = z.object({
+  document_type_id: z.string().uuid('Invalid document type ID'),
+  study_id: z.string().uuid('Invalid study ID').optional(),
+  site_id: z.string().uuid('Invalid site ID').optional(),
+  document_name: z.string().min(1, 'Document name is required').max(300).trim(),
+  effective_date: z.string().date('Invalid effective date').optional(),
+  expiration_date: z.string().date('Invalid expiration date').optional(),
+});
+
+export type CreateRegulatoryDocumentSchema = z.infer<typeof createRegulatoryDocumentSchema>;
+
+export const uploadDocumentVersionSchema = z.object({
+  effective_date: z.string().date('Invalid effective date').optional(),
+  expiration_date: z.string().date('Invalid expiration date').optional(),
+  replacement_reason: z.string().max(1000).trim().optional(),
+  confirm_duplicate: z.boolean().optional(),
+});
+
+export type UploadDocumentVersionSchema = z.infer<typeof uploadDocumentVersionSchema>;
+
+export const rejectDocumentSchema = z.object({
+  reason: z.string().min(1, 'A reason is required').max(1000).trim(),
+});
+
+export type RejectDocumentSchema = z.infer<typeof rejectDocumentSchema>;
+
+export const archiveDocumentSchema = z.object({
+  reason: z.string().min(1, 'A reason is required').max(1000).trim(),
+});
+
+export type ArchiveDocumentSchema = z.infer<typeof archiveDocumentSchema>;
+
+export const overrideDocumentStatusSchema = z.object({
+  new_status: z.enum([
+    'missing',
+    'draft',
+    'pending_review',
+    'current',
+    'expiring_soon',
+    'expired',
+    'rejected',
+    'archived',
+  ]),
+  reason: z.string().min(1, 'A reason is required').max(1000).trim(),
+});
+
+export type OverrideDocumentStatusSchema = z.infer<typeof overrideDocumentStatusSchema>;
+
+// ── Regulatory: Staff Credentials ───────────────────────────────────────────
+
+export const createStaffDocumentSchema = z.object({
+  user_id: z.string().uuid('Invalid user ID'),
+  document_type_id: z.string().uuid('Invalid document type ID'),
+  site_id: z.string().uuid('Invalid site ID').optional(),
+  effective_date: z.string().date('Invalid effective date').optional(),
+  expiration_date: z.string().date('Invalid expiration date').optional(),
+});
+
+export type CreateStaffDocumentSchema = z.infer<typeof createStaffDocumentSchema>;
+
 export type OverridePrescreeningSchema = z.infer<typeof overridePrescreeningSchema>;

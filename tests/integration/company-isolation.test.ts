@@ -16,6 +16,7 @@ import { AIDraftService } from '@/services/studies/AIDraftService';
 import { SubjectService } from '@/services/subjects/SubjectService';
 import { VisitService } from '@/services/visits/VisitService';
 import { LeadService } from '@/services/recruitment/LeadService';
+import { RegulatoryDocumentService } from '@/services/regulatory/RegulatoryDocumentService';
 import { NotFoundError } from '@/lib/api/errors';
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -463,6 +464,37 @@ describe('LeadService — company isolation', () => {
     for (const call of companyEqCalls) {
       expect(call[1]).toBe(COMPANY_A);
     }
+  });
+});
+
+// ── RegulatoryDocumentService ─────────────────────────────────────────────────
+
+describe('RegulatoryDocumentService — company isolation', () => {
+  it('getById() scopes the document lookup to company_id from context', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const { client, eqCalls } = makeTrackingClient(null, null);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await expect(
+      RegulatoryDocumentService.getById('doc-other-company', makeCtx(COMPANY_A)),
+    ).rejects.toThrow(NotFoundError);
+
+    const companyEq = eqCalls.find(([col]) => col === 'company_id');
+    expect(companyEq).toBeDefined();
+    expect(companyEq![1]).toBe(COMPANY_A);
+  });
+
+  it('list() scopes the binder query to company_id from context, not a client-supplied one', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const { client, eqCalls } = makeTrackingClient([]);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await RegulatoryDocumentService.list({}, makeCtx(COMPANY_B));
+
+    const companyEq = eqCalls.find(([col]) => col === 'company_id');
+    expect(companyEq).toBeDefined();
+    expect(companyEq![1]).toBe(COMPANY_B);
+    expect(companyEq![1]).not.toBe(COMPANY_A);
   });
 });
 
