@@ -10,6 +10,7 @@ import { StudyProfileHeader } from '@/components/studies/StudyProfileHeader';
 import { StudySitesTab } from '@/components/studies/StudySitesTab';
 import { ProtocolUploader } from '@/components/studies/ProtocolUploader';
 import { AIReviewPanel } from '@/components/studies/AIReviewPanel';
+import { StudyRegulatoryPageContent } from '@/components/regulatory/StudyRegulatoryPageContent';
 import type { Study } from '@/types/studies';
 
 const TABS = [
@@ -66,7 +67,11 @@ export default function StudyProfilePage({ params }: { params: Promise<{ id: str
 
   return (
     <div>
-      <StudyProfileHeader study={study} onChanged={() => void fetchStudy()} />
+      <StudyProfileHeader
+        study={study}
+        onChanged={() => void fetchStudy()}
+        onNavigateTab={(t) => setTab(t as Tab)}
+      />
 
       <div className="mb-6 flex gap-1 border-b border-gray-200">
         {TABS.map((t) => (
@@ -187,7 +192,7 @@ export default function StudyProfilePage({ params }: { params: Promise<{ id: str
       {tab === 'AI Review' && <AIReviewPanel studyId={study.id} />}
 
       {tab === 'Subjects' && <ComingSoon module="Subjects" />}
-      {tab === 'Regulatory' && <ComingSoon module="Regulatory" />}
+      {tab === 'Regulatory' && <StudyRegulatoryPageContent studyId={study.id} />}
       {tab === 'Analytics' && <ComingSoon module="Analytics" />}
       {tab === 'Timeline' && <ComingSoon module="Timeline" />}
     </div>

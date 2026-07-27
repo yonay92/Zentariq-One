@@ -26,9 +26,12 @@ export function ArchiveStudyModal({ study, onChanged }: { study: Study; onChange
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(reason.trim() ? { reason: reason.trim() } : {}),
       });
-      const json = (await res.json()) as { success: boolean; message?: string };
+      const json = (await res.json()) as {
+        success: boolean;
+        error?: { message?: string };
+      };
       if (!res.ok || !json.success) {
-        setError(json.message ?? 'Failed to archive study');
+        setError(json.error?.message ?? 'Failed to archive study');
         return;
       }
       setOpen(false);

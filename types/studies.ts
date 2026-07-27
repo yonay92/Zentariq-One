@@ -225,3 +225,44 @@ export type FileRecord = {
   checksum: string | null;
   ai_processed: boolean;
 };
+
+// Every key is computed from real backend state in
+// StudyService.getActivationReadiness() — nothing here is hardcoded per
+// study. `blocking: true` items mirror an actual enforced rule in
+// StudyService.activateStudy() (today: an approved visit template, and the
+// caller holding manage_studies) — everything else is a non-blocking,
+// informational recommendation, since those aren't currently enforced
+// business rules and this endpoint must not invent new ones unilaterally.
+export type ActivationReadinessItemKey =
+  | 'protocol_uploaded'
+  | 'ai_extraction_completed'
+  | 'ai_review_completed'
+  | 'required_fields_completed'
+  | 'sponsor_assigned'
+  | 'protocol_number_assigned'
+  | 'visit_templates_generated'
+  | 'visit_templates_approved'
+  | 'site_assigned'
+  | 'regulatory_requirements_configured'
+  | 'user_has_permission';
+
+export type ActivationReadinessFixAction = {
+  label: string;
+  href: string | null;
+};
+
+export type ActivationReadinessItem = {
+  key: ActivationReadinessItemKey;
+  label: string;
+  met: boolean;
+  blocking: boolean;
+  reason: string | null;
+  fixAction: ActivationReadinessFixAction | null;
+};
+
+export type ActivationReadiness = {
+  canActivate: boolean;
+  blockingItems: ActivationReadinessItem[];
+  warnings: ActivationReadinessItem[];
+  items: ActivationReadinessItem[];
+};
