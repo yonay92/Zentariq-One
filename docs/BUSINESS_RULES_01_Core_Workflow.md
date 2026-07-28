@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Business Rules is the execution engine of ClinicalOS. Users perform actions, Business Rules evaluate conditions, and the system creates the next operational step.
+Business Rules is the execution engine of Zentariq One. Users perform actions, Business Rules evaluate conditions, and the system creates the next operational step.
 
 ## Rule Engine
 

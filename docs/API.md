@@ -1,16 +1,16 @@
 # API.md
 
-# ClinicalOS API Specification
+# Zentariq One API Specification
 
 Version: 1.0  
-Project: ClinicalOS  
-Purpose: Define the API structure, service boundaries, endpoint conventions, request/response patterns, permissions, and backend implementation rules for ClinicalOS.
+Project: Zentariq One  
+Purpose: Define the API structure, service boundaries, endpoint conventions, request/response patterns, permissions, and backend implementation rules for Zentariq One.
 
 ---
 
 ## 1. API Philosophy
 
-ClinicalOS uses a Supabase-backed architecture with a Next.js frontend.
+Zentariq One uses a Supabase-backed architecture with a Next.js frontend.
 
 The API layer must provide a clean and secure abstraction over:
 
@@ -333,7 +333,7 @@ Permissions:
 ### POST /api/sites/:id/archive
 
 Archives a site (see `BUSINESS_RULES` — Site Archive, in
-`DATABASE_Part_01_Core_SaaS_Users_Roles_Sites.md`). ClinicalOS never
+`DATABASE_Part_01_Core_SaaS_Users_Roles_Sites.md`). Zentariq One never
 hard-deletes a site; this is the only "remove" operation available.
 
 Optional:
@@ -457,7 +457,7 @@ Permissions:
 
 ### POST /api/studies/:id/archive
 
-Archives a study (see Business Rules — Study Archive). ClinicalOS never
+Archives a study (see Business Rules — Study Archive). Zentariq One never
 hard-deletes a study; this is the only "remove" operation available.
 
 Optional:
@@ -946,7 +946,7 @@ Answers analytics questions.
 
 ### POST /api/ai/copilot
 
-General ClinicalOS Copilot.
+General Zentariq One Copilot.
 
 ### POST /api/ai/suggestions
 

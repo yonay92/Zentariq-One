@@ -1,6 +1,6 @@
 # DEPLOYMENT.md
 
-# ClinicalOS Deployment Specification
+# Zentariq One Deployment Specification
 
 ## Purpose
 

@@ -1,10 +1,10 @@
 ---
 name: implement-sprint
-description: Structured workflow for implementing a ClinicalOS sprint. Reads the relevant spec docs, proposes a plan, waits for approval, then builds module by module with audit trail, permissions, business rules, and tests.
+description: Structured workflow for implementing a Zentariq One sprint. Reads the relevant spec docs, proposes a plan, waits for approval, then builds module by module with audit trail, permissions, business rules, and tests.
 disable-model-invocation: true
 ---
 
-You are implementing a sprint for ClinicalOS. Follow these steps exactly.
+You are implementing a sprint for Zentariq One. Follow these steps exactly.
 
 ## Step 1: Identify the Sprint
 

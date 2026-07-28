@@ -1,12 +1,12 @@
 # ROADMAP.md
 
-# ClinicalOS Product Roadmap
+# Zentariq One Product Roadmap
 
 Version: 1.0
 
 ## Vision
 
-ClinicalOS will evolve from an enterprise CTMS platform into a complete AI-powered operating system for Clinical Research Organizations (CROs), Sites, Sponsors and Research Networks.
+Zentariq One will evolve from an enterprise CTMS platform into a complete AI-powered operating system for Clinical Research Organizations (CROs), Sites, Sponsors and Research Networks.
 
 Mission:
 
@@ -186,7 +186,7 @@ Identity:
 
 # Long-Term Vision
 
-ClinicalOS becomes the central operating system for clinical research organizations.
+Zentariq One becomes the central operating system for clinical research organizations.
 
 Every workflow, document, task, study, subject and operational decision is managed from a single intelligent platform.
 
@@ -237,6 +237,6 @@ Business:
 
 # Final Vision Statement
 
-ClinicalOS is not intended to compete only with traditional CTMS platforms.
+Zentariq One is not intended to compete only with traditional CTMS platforms.
 
 Its long-term objective is to become the intelligent operating system that coordinates every operational aspect of modern clinical research through automation, configurable business rules and specialized artificial intelligence.

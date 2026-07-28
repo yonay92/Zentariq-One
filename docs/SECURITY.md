@@ -1,16 +1,16 @@
 # SECURITY.md
 
-# ClinicalOS Security Specification
+# Zentariq One Security Specification
 
 Version: 1.0  
-Project: ClinicalOS  
-Purpose: Define the complete security architecture for ClinicalOS.
+Project: Zentariq One  
+Purpose: Define the complete security architecture for Zentariq One.
 
 ---
 
 ## 1. Security Philosophy
 
-ClinicalOS is designed for clinical research operations and must protect sensitive operational, regulatory, subject, staff, study and document data.
+Zentariq One is designed for clinical research operations and must protect sensitive operational, regulatory, subject, staff, study and document data.
 
 Security is not a frontend feature.
 
@@ -44,7 +44,7 @@ The frontend may improve user experience, but it must never be trusted as the pr
 
 ## 3. Multi-Tenant Isolation
 
-ClinicalOS is a SaaS platform.
+Zentariq One is a SaaS platform.
 
 Each tenant is represented by `company_id`.
 
@@ -391,7 +391,7 @@ Apply rate limits to:
 
 ## 16. Data Retention
 
-ClinicalOS should support data retention rules per Company.
+Zentariq One should support data retention rules per Company.
 
 Future capabilities:
 
@@ -450,4 +450,4 @@ Before production:
 
 Security is part of the architecture, not a feature to add later.
 
-ClinicalOS must be secure by default, auditable by design and scalable for enterprise SaaS deployment.
+Zentariq One must be secure by default, auditable by design and scalable for enterprise SaaS deployment.

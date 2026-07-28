@@ -1,9 +1,9 @@
 # ERD.md
 
-# ClinicalOS Entity Relationship Design
+# Zentariq One Entity Relationship Design
 
 Version: 1.0  
-Product: ClinicalOS  
+Product: Zentariq One  
 Document Type: Entity Relationship Diagram Specification  
 Status: Approved for Database Design
 
@@ -11,7 +11,7 @@ Status: Approved for Database Design
 
 ## 1. Purpose
 
-This document defines the main entity relationships for ClinicalOS.
+This document defines the main entity relationships for Zentariq One.
 
 It is intended to guide Claude during database implementation in Supabase/PostgreSQL.
 
@@ -521,4 +521,4 @@ Which site?
 Which record?
 ```
 
-That traceability is mandatory for ClinicalOS.
+That traceability is mandatory for Zentariq One.

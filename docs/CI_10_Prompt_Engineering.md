@@ -22,4 +22,4 @@ Every agent receives:
 - Deterministic where possible
 - Structured JSON outputs
 - No hallucinated data
-- Cite source records from ClinicalOS only
+- Cite source records from Zentariq One only

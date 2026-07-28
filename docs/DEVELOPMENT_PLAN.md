@@ -1,12 +1,12 @@
 # DEVELOPMENT_PLAN.md
 
-# ClinicalOS Development Plan
+# Zentariq One Development Plan
 
 Version: 1.0
 
 ## Objective
 
-Build ClinicalOS incrementally using a modular architecture. Every sprint must produce a deployable and testable application.
+Build Zentariq One incrementally using a modular architecture. Every sprint must produce a deployable and testable application.
 
 ---
 
@@ -194,7 +194,7 @@ Agents:
 - Copilot
 
 Deliverables:
-AI integrated across ClinicalOS.
+AI integrated across Zentariq One.
 
 ---
 

@@ -1,6 +1,6 @@
 # BUSINESS RULES 07 - Task Engine
 
-Task Engine is the operational heart of ClinicalOS.
+Task Engine is the operational heart of Zentariq One.
 
 ## Automatic Task Sources
 

@@ -45,7 +45,7 @@ dates) may be edited at any time by a user with `edit_study` or
 
 ## Study Archive
 
-ClinicalOS never hard-deletes a Study from the application. "Delete" is
+Zentariq One never hard-deletes a Study from the application. "Delete" is
 implemented as Archive (`status = 'archived'`).
 
 Rules:

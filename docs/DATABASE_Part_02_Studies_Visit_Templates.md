@@ -1,17 +1,17 @@
 # DATABASE_Part_02.md
 
-# ClinicalOS Database Architecture — Part 02
+# Zentariq One Database Architecture — Part 02
 
 ## Studies, Study Sites, Study Staff, Visit Templates, Study Documents
 
 Version: 1.0  
-Project: ClinicalOS
+Project: Zentariq One
 
 ---
 
 ## 1. Purpose
 
-This part defines how ClinicalOS stores studies, staff assignments, study sites, protocol versions, AI extractions, and visit templates.
+This part defines how Zentariq One stores studies, staff assignments, study sites, protocol versions, AI extractions, and visit templates.
 
 A Study is not just a record. It is the operational foundation for Subjects, Visits, Charts, Regulatory Documents, Analytics, and Business Rules.
 

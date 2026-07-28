@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'ClinicalOS',
+  title: 'Zentariq One',
   description: 'Enterprise Clinical Research Operations Platform',
 };
 

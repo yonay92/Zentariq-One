@@ -17,6 +17,8 @@ import type {
   FileRecord,
   CrcOption,
   CreateVisitTemplateItemInput,
+  ActivationReadiness,
+  ActivationReadinessItem,
 } from '@/types/studies';
 import type { RequestContext } from '@/types/api';
 
@@ -555,6 +557,200 @@ export const StudyService = {
     });
 
     return updated as Study;
+  },
+
+  // Single source of truth for "can this study be activated, and if not,
+  // why" — read by the frontend's ActivationReadiness panel instead of the
+  // frontend re-deriving any of this itself. `blocking: true` items reuse
+  // the exact same checks activateStudy() itself enforces (an approved
+  // visit template, and the caller holding manage_studies) — every other
+  // item is real, computed data, but non-blocking, since none of the other
+  // conditions are currently enforced rules in activateStudy() and this
+  // endpoint must not silently invent new ones.
+  async getActivationReadiness(studyId: string, ctx: RequestContext): Promise<ActivationReadiness> {
+    const study = await this.getById(studyId, ctx);
+    const supabase = await createServerSupabaseClient();
+
+    const canManage = await PermissionService.hasPermission(ctx.user.id, 'manage_studies');
+
+    // Reuses VisitTemplateService's own check — not reimplemented — so this
+    // endpoint can never drift from what activateStudy() actually enforces.
+    const hasApprovedTemplate = await VisitTemplateService.hasApprovedTemplate(
+      studyId,
+      ctx.company.id,
+    );
+
+    const { data: templateRows } = await supabase
+      .from('visit_templates')
+      .select('id')
+      .eq('study_id', studyId)
+      .eq('company_id', ctx.company.id)
+      .limit(1);
+    const hasAnyTemplate = (templateRows?.length ?? 0) > 0;
+
+    const { data: siteRows } = await supabase
+      .from('study_sites')
+      .select('id')
+      .eq('study_id', studyId)
+      .eq('company_id', ctx.company.id)
+      .limit(1);
+    const hasSite = (siteRows?.length ?? 0) > 0;
+
+    const { data: protocolDocRows } = await supabase
+      .from('study_documents')
+      .select('id')
+      .eq('study_id', studyId)
+      .eq('company_id', ctx.company.id)
+      .eq('document_type', 'protocol')
+      .limit(1);
+    const hasProtocolDoc = (protocolDocRows?.length ?? 0) > 0;
+
+    // A study whose row already exists only ever got here either by manual
+    // creation or by AIDraftService.finalizeDraft() — the latter is what
+    // performs "AI extraction" and "AI review" in the first place, so both
+    // are trivially satisfied for any already-existing AI-generated study.
+    // The one way review can still be genuinely incomplete on an existing
+    // study is a pending (unreviewed) amendment extraction.
+    const { data: pendingExtractionRows } = await supabase
+      .from('study_ai_extractions')
+      .select('id')
+      .eq('study_id', studyId)
+      .eq('company_id', ctx.company.id)
+      .eq('approved', false)
+      .limit(1);
+    const hasPendingExtraction = (pendingExtractionRows?.length ?? 0) > 0;
+
+    const { data: requirementRows } = await supabase
+      .from('study_document_requirements')
+      .select('id')
+      .eq('company_id', ctx.company.id)
+      .or(`study_id.eq.${studyId},and(study_id.is.null,site_id.is.null)`)
+      .limit(1);
+    const hasRegulatoryRequirements = (requirementRows?.length ?? 0) > 0;
+
+    const items: ActivationReadinessItem[] = [];
+
+    if (study.ai_generated) {
+      items.push({
+        key: 'ai_extraction_completed',
+        label: 'AI extraction completed',
+        met: true,
+        blocking: false,
+        reason: null,
+        fixAction: null,
+      });
+      items.push({
+        key: 'ai_review_completed',
+        label: 'AI Review completed',
+        met: !hasPendingExtraction,
+        blocking: false,
+        reason: hasPendingExtraction
+          ? 'A protocol amendment extraction is still pending human review.'
+          : null,
+        fixAction: hasPendingExtraction ? { label: 'Open AI Review', href: null } : null,
+      });
+    }
+
+    items.push(
+      {
+        key: 'protocol_uploaded',
+        label: 'Protocol uploaded',
+        met: hasProtocolDoc,
+        blocking: false,
+        reason: hasProtocolDoc ? null : 'No protocol document has been uploaded for this study.',
+        fixAction: hasProtocolDoc ? null : { label: 'Upload Protocol', href: null },
+      },
+      {
+        key: 'required_fields_completed',
+        label: 'Required study fields completed',
+        met: Boolean(study.study_name) && Boolean(study.phase),
+        blocking: false,
+        reason:
+          Boolean(study.study_name) && Boolean(study.phase)
+            ? null
+            : 'Study name and phase should be set before activation.',
+        fixAction:
+          Boolean(study.study_name) && Boolean(study.phase)
+            ? null
+            : { label: 'Edit Study', href: null },
+      },
+      {
+        key: 'sponsor_assigned',
+        label: 'Sponsor assigned',
+        met: Boolean(study.sponsor),
+        blocking: false,
+        reason: study.sponsor ? null : 'No sponsor is set for this study.',
+        fixAction: study.sponsor ? null : { label: 'Edit Study', href: null },
+      },
+      {
+        key: 'protocol_number_assigned',
+        label: 'Protocol number assigned',
+        met: Boolean(study.protocol_number),
+        blocking: false,
+        reason: study.protocol_number ? null : 'No protocol number is set for this study.',
+        fixAction: study.protocol_number ? null : { label: 'Edit Study', href: null },
+      },
+      {
+        key: 'visit_templates_generated',
+        label: 'Visit Templates generated',
+        met: hasAnyTemplate,
+        blocking: false,
+        reason: hasAnyTemplate ? null : 'No visit template has been created for this study yet.',
+        fixAction: hasAnyTemplate
+          ? null
+          : { label: 'Build Visit Template', href: `/studies/${studyId}/visit-templates` },
+      },
+      {
+        key: 'visit_templates_approved',
+        label: 'Visit Templates approved',
+        met: hasApprovedTemplate,
+        blocking: true,
+        reason: hasApprovedTemplate
+          ? null
+          : 'The visit schedule has not been approved yet — this is required before activation.',
+        fixAction: hasApprovedTemplate
+          ? null
+          : { label: 'Review Visit Templates', href: `/studies/${studyId}/visit-templates` },
+      },
+      {
+        key: 'site_assigned',
+        label: 'At least one Site assigned',
+        met: hasSite,
+        blocking: false,
+        reason: hasSite ? null : 'No site is assigned to this study.',
+        fixAction: hasSite ? null : { label: 'Assign Site', href: null },
+      },
+      {
+        key: 'regulatory_requirements_configured',
+        label: 'Regulatory requirements configured',
+        met: hasRegulatoryRequirements,
+        blocking: false,
+        reason: hasRegulatoryRequirements
+          ? null
+          : 'No regulatory document requirements are configured for this study.',
+        fixAction: hasRegulatoryRequirements
+          ? null
+          : { label: 'Configure Requirements', href: `/studies/${studyId}/regulatory` },
+      },
+      {
+        key: 'user_has_permission',
+        label: 'User has permission to activate',
+        met: canManage,
+        blocking: true,
+        reason: canManage ? null : 'You do not have permission to activate studies.',
+        fixAction: null,
+      },
+    );
+
+    const blockingItems = items.filter((i) => !i.met && i.blocking);
+    const warnings = items.filter((i) => !i.met && !i.blocking);
+
+    return {
+      canActivate: blockingItems.length === 0,
+      blockingItems,
+      warnings,
+      items,
+    };
   },
 
   async closeStudy(studyId: string, ctx: RequestContext): Promise<Study> {

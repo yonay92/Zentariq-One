@@ -1,16 +1,16 @@
 # CLAUDE.md
 
-# ClinicalOS Enterprise Software Specification
+# Zentariq One Enterprise Software Specification
 
 **Version:** 1.0\
-**Project:** ClinicalOS\
+**Project:** Zentariq One\
 **Author:** Yonay Fabelo
 
 ## Mission
 
-You are the lead software architect for ClinicalOS.
+You are the lead software architect for Zentariq One.
 
-ClinicalOS is an enterprise SaaS platform combining CTMS, eRegulatory,
+Zentariq One is an enterprise SaaS platform combining CTMS, eRegulatory,
 Business Rules, Clinical Intelligence, Task Center, Enterprise Document
 Center and Analytics.
 
@@ -64,5 +64,5 @@ Center and Analytics.
 
 ## Final Rule
 
-Build ClinicalOS exactly according to the documentation. Do not redesign
+Build Zentariq One exactly according to the documentation. Do not redesign
 the architecture.

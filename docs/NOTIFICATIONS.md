@@ -1,6 +1,6 @@
 # NOTIFICATIONS.md
 
-# ClinicalOS — Notification Architecture Specification
+# Zentariq One — Notification Architecture Specification
 
 Version: 1.0
 Status: Production-Ready — Required before Sprint 1 (tables) / Sprint 8 (full implementation)
@@ -9,7 +9,7 @@ Status: Production-Ready — Required before Sprint 1 (tables) / Sprint 8 (full 
 
 ## 1. Purpose
 
-This document defines the complete notification system for ClinicalOS. It resolves **GAP-DB-01** from GAP_ANALYSIS.md by specifying the `notifications` and `notification_preferences` tables, their RLS policies, the dispatch service, the delivery channels, the event type catalog, and the real-time subscription model.
+This document defines the complete notification system for Zentariq One. It resolves **GAP-DB-01** from GAP_ANALYSIS.md by specifying the `notifications` and `notification_preferences` tables, their RLS policies, the dispatch service, the delivery channels, the event type catalog, and the real-time subscription model.
 
 ---
 
@@ -284,7 +284,7 @@ This is the exhaustive list of notification event types. Both `notifications.typ
 | `ai_review_pending`         | high             | ClinicalIntelligenceService.runAgent()   | "AI analysis ready for review: {agent_name}"     |
 | `ai_request_failed`         | high             | ClinicalIntelligenceService (on failure) | "AI request failed — please retry"               |
 | `subject_status_changed`    | medium           | SubjectService.updateStatus()            | "Subject {subject_number} status: {new_status}"  |
-| `user_invited`              | high             | InvitationService.sendInvitation()       | "You've been invited to ClinicalOS"              |
+| `user_invited`              | high             | InvitationService.sendInvitation()       | "You've been invited to Zentariq One"            |
 | `ai_budget_warning`         | high             | AIProviderClient (budget check)          | "AI token budget at {pct}% for this month"       |
 | `study_activated`           | medium           | StudyService.activateStudy()             | "Study activated: {study_name}"                  |
 | `protocol_amendment`        | high             | StudyService.uploadProtocolAmendment()   | "Protocol amended: {study_name}"                 |

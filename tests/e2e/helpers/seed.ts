@@ -14,7 +14,7 @@ import { createAdminSupabaseClient } from '@/lib/supabase/admin';
  * active study.
  */
 
-const COMPANY_NAME = 'ClinicalOS E2E Tests';
+const COMPANY_NAME = 'Zentariq E2E Tests';
 const SITE_NAME = 'E2E Test Site';
 
 // Fixed test-only credential for a dedicated, disposable e2e Supabase project
@@ -24,9 +24,9 @@ const SITE_NAME = 'E2E Test Site';
 export const E2E_PASSWORD = 'E2eTestPass!2024';
 
 export const E2E_USERS = {
-  admin: { email: 'e2e-admin@clinicalos-e2e.test', roleKey: 'e2e_admin' },
-  phi: { email: 'e2e-phi@clinicalos-e2e.test', roleKey: 'e2e_phi' },
-  nophi: { email: 'e2e-nophi@clinicalos-e2e.test', roleKey: 'e2e_nophi' },
+  admin: { email: 'e2e-admin@zentariq-e2e.test', roleKey: 'e2e_admin' },
+  phi: { email: 'e2e-phi@zentariq-e2e.test', roleKey: 'e2e_phi' },
+  nophi: { email: 'e2e-nophi@zentariq-e2e.test', roleKey: 'e2e_nophi' },
 } as const;
 
 export type E2EPersona = keyof typeof E2E_USERS;

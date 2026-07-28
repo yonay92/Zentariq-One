@@ -1,11 +1,11 @@
 # DATABASE_Part_05.md
 
-# ClinicalOS Database Architecture — Part 05
+# Zentariq One Database Architecture — Part 05
 
 ## Regulatory, Enterprise Document Center, Business Rules, Clinical Intelligence, Audit Trail
 
 Version: 1.0  
-Project: ClinicalOS
+Project: Zentariq One
 
 ---
 

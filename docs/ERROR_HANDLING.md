@@ -1,6 +1,6 @@
 # ERROR_HANDLING.md
 
-# ClinicalOS Error Handling
+# Zentariq One Error Handling
 
 ## Goals
 

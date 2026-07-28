@@ -1,6 +1,6 @@
 # AI_PROVIDER_ARCHITECTURE.md
 
-# ClinicalOS — AI Provider Architecture Specification
+# Zentariq One — AI Provider Architecture Specification
 
 Version: 1.0
 Status: Production-Ready — Required before Sprint 10
@@ -9,7 +9,7 @@ Status: Production-Ready — Required before Sprint 10
 
 ## 1. Purpose
 
-This document defines the concrete AI provider implementation for ClinicalOS. It resolves **GAP-AI-01** and **GAP-AI-02** from GAP_ANALYSIS.md: the provider abstraction interface, model selection, request/response lifecycle, error handling, cost tracking, and the integration contract that all Clinical Intelligence agents must follow.
+This document defines the concrete AI provider implementation for Zentariq One. It resolves **GAP-AI-01** and **GAP-AI-02** from GAP_ANALYSIS.md: the provider abstraction interface, model selection, request/response lifecycle, error handling, cost tracking, and the integration contract that all Clinical Intelligence agents must follow.
 
 ---
 

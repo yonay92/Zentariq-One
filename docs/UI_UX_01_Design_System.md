@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define the visual language of ClinicalOS.
+Define the visual language of Zentariq One.
 
 ## Design Principles
 

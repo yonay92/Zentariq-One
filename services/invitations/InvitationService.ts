@@ -131,8 +131,8 @@ export const InvitationService = {
       type: 'user_invited',
       companyId: ctx.company.id,
       recipientUserId: null,
-      customTitle: "You've been invited to ClinicalOS",
-      customBody: `You have been invited to join ClinicalOS by ${ctx.user.full_name}. Click the link below to set up your account. This link expires in 72 hours.\n\n${acceptUrl}\n\nIf you did not expect this invitation, you can safely ignore this email.`,
+      customTitle: "You've been invited to Zentariq One",
+      customBody: `You have been invited to join Zentariq One by ${ctx.user.full_name}. Click the link below to set up your account. This link expires in 72 hours.\n\n${acceptUrl}\n\nIf you did not expect this invitation, you can safely ignore this email.`,
       context: { token, email: input.email },
     });
 
@@ -375,8 +375,8 @@ export const InvitationService = {
       type: 'user_invited',
       companyId: ctx.company.id,
       recipientUserId: null,
-      customTitle: 'Reminder: Your ClinicalOS invitation is waiting',
-      customBody: `Your invitation to ClinicalOS is waiting. Click the link below to set up your account. This link expires in 72 hours.\n\n${acceptUrl}`,
+      customTitle: 'Reminder: Your Zentariq One invitation is waiting',
+      customBody: `Your invitation to Zentariq One is waiting. Click the link below to set up your account. This link expires in 72 hours.\n\n${acceptUrl}`,
       context: { token: newToken, email: inv.email },
     });
 

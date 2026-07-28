@@ -130,7 +130,7 @@ async function sendEmail(row: EmailQueueRow): Promise<boolean> {
 
 async function sendViaResend(row: EmailQueueRow, apiKey: string): Promise<boolean> {
   try {
-    const fromEmail = Deno.env.get('RESEND_FROM_EMAIL') ?? 'noreply@clinicalos.com';
+    const fromEmail = Deno.env.get('RESEND_FROM_EMAIL') ?? 'noreply@zentariqone.com';
 
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -139,7 +139,7 @@ async function sendViaResend(row: EmailQueueRow, apiKey: string): Promise<boolea
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: `ClinicalOS <${fromEmail}>`,
+        from: `Zentariq One <${fromEmail}>`,
         to: [row.email],
         subject: row.subject,
         html: row.html_body,

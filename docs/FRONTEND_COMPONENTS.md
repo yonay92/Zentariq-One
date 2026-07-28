@@ -1,16 +1,16 @@
 # FRONTEND_COMPONENTS.md
 
-# ClinicalOS Frontend Component Specification
+# Zentariq One Frontend Component Specification
 
 Version: 1.0  
-Project: ClinicalOS  
-Purpose: Define the reusable frontend component system for ClinicalOS.
+Project: Zentariq One  
+Purpose: Define the reusable frontend component system for Zentariq One.
 
 ---
 
 ## 1. Component Philosophy
 
-ClinicalOS must use a reusable component library.
+Zentariq One must use a reusable component library.
 
 No page should create custom UI if a reusable component already exists.
 

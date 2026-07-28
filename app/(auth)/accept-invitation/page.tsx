@@ -117,8 +117,8 @@ function AcceptInvitationForm() {
     <div className="rounded-xl border border-gray-200 bg-white p-8 shadow-sm">
       <h2 className="mb-2 text-xl font-semibold text-gray-900">Accept your invitation</h2>
       <p className="mb-6 text-sm text-gray-500">
-        You&apos;ve been invited to ClinicalOS as <strong>{validEmail}</strong>. Create your account
-        to get started.
+        You&apos;ve been invited to Zentariq One as <strong>{validEmail}</strong>. Create your
+        account to get started.
       </p>
 
       {error && (
