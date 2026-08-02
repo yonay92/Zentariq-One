@@ -16,7 +16,11 @@ const FUNNEL_ORDER: LeadStatus[] = [
   'lost',
 ];
 
-const FUNNEL_LABEL: Record<LeadStatus, string> = {
+// Deliberately covers only the 7 core funnel stages listed in FUNNEL_ORDER
+// above — the dashboard funnel chart is a simplified view (out of scope for
+// this phase's full status vocabulary; see Sprint 7.1 plan), not a lookup
+// for every possible lead.status value.
+const FUNNEL_LABEL: Partial<Record<LeadStatus, string>> = {
   new: 'New',
   contacted: 'Contacted',
   prescreening: 'Prescreening',

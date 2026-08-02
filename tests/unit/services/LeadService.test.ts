@@ -58,13 +58,22 @@ function baseLead(overrides: Partial<Lead> = {}): Lead {
     referral_source_id: null,
     initials: 'JD',
     status: 'prescreening',
+    priority: 'medium',
+    assigned_user_id: null,
     contact_attempt_count: 1,
     last_contacted_at: null,
     next_contact_at: null,
     waitlisted_at: null,
+    consent_to_contact: false,
+    do_not_contact: false,
+    do_not_contact_reason: null,
+    source_detail: null,
+    notes_summary: null,
     converted_subject_id: null,
     converted_at: null,
     declined_reason: null,
+    archived_at: null,
+    archived_by: null,
     created_by: USER_ID,
     updated_by: USER_ID,
     created_at: new Date().toISOString(),
@@ -79,6 +88,7 @@ function queryStub(data: unknown, error: unknown = null) {
     select: vi.fn().mockReturnThis(),
     eq: vi.fn().mockReturnThis(),
     in: vi.fn().mockReturnThis(),
+    is: vi.fn().mockReturnThis(),
     order: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
     insert: vi.fn().mockReturnThis(),
@@ -89,7 +99,7 @@ function queryStub(data: unknown, error: unknown = null) {
     catch: resolved.catch.bind(resolved),
     finally: resolved.finally.bind(resolved),
   };
-  for (const key of ['select', 'eq', 'in', 'order', 'limit', 'insert', 'update']) {
+  for (const key of ['select', 'eq', 'in', 'is', 'order', 'limit', 'insert', 'update']) {
     (stub[key] as ReturnType<typeof vi.fn>).mockReturnValue(stub);
   }
   return stub;
@@ -330,6 +340,7 @@ describe('LeadService.convertToSubject', () => {
       { data: { computed_outcome: 'potentially_eligible', manual_outcome: null } }, // latest prescreening
       { data: contactInfo }, // lead_contact_info lookup
       { data: baseLead({ status: 'converted', converted_subject_id: 'subject-uuid' }) }, // lead update
+      { data: null }, // lead_status_history insert
     );
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
@@ -360,5 +371,266 @@ describe('LeadService.getById', () => {
     vi.mocked(createServerSupabaseClient).mockResolvedValue(makeSupabaseClient({ data: null }));
 
     await expect(LeadService.getById(LEAD_ID, makeCtx())).rejects.toThrow(NotFoundError);
+  });
+});
+
+describe('LeadService.assign', () => {
+  it('throws PermissionDeniedError when the user lacks assign_lead', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('assign_lead'),
+    );
+
+    await expect(
+      LeadService.assign(LEAD_ID, { assigned_user_id: USER_ID }, makeCtx()),
+    ).rejects.toThrow(PermissionDeniedError);
+  });
+
+  it('validates the target user exists in the company before assigning', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const validateUserExists = vi
+      .spyOn(PermissionService, 'validateUserExists')
+      .mockRejectedValue(new NotFoundError('User'));
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: baseLead() }),
+    );
+
+    await expect(
+      LeadService.assign(LEAD_ID, { assigned_user_id: 'other-user' }, makeCtx()),
+    ).rejects.toThrow(NotFoundError);
+    expect(validateUserExists).toHaveBeenCalledWith('other-user', COMPANY_ID);
+  });
+
+  it('assigns the lead and audits old and new owner', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(PermissionService, 'validateUserExists').mockResolvedValue({} as never);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient(
+        { data: baseLead({ assigned_user_id: null }) },
+        { data: baseLead({ assigned_user_id: USER_ID }) },
+      ),
+    );
+
+    const updated = await LeadService.assign(LEAD_ID, { assigned_user_id: USER_ID }, makeCtx());
+
+    expect(updated.assigned_user_id).toBe(USER_ID);
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'lead.assigned',
+        old_value: { assigned_user_id: null },
+        new_value: { assigned_user_id: USER_ID },
+      }),
+    );
+  });
+});
+
+describe('LeadService.archive', () => {
+  it('throws PermissionDeniedError when the user lacks archive_lead', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('archive_lead'),
+    );
+
+    await expect(LeadService.archive(LEAD_ID, {}, makeCtx())).rejects.toThrow(
+      PermissionDeniedError,
+    );
+  });
+
+  it('throws BusinessRuleError when the lead is already archived', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: baseLead({ archived_at: new Date().toISOString() }) }),
+    );
+
+    await expect(LeadService.archive(LEAD_ID, {}, makeCtx())).rejects.toThrow(BusinessRuleError);
+  });
+
+  it('archives a terminal lead without being blocked by assertNotTerminal (administrative action)', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient(
+        { data: baseLead({ status: 'converted', archived_at: null }) },
+        { data: baseLead({ status: 'converted', archived_at: new Date().toISOString() }) },
+      ),
+    );
+
+    const archived = await LeadService.archive(LEAD_ID, { reason: 'cleanup' }, makeCtx());
+
+    expect(archived.archived_at).not.toBeNull();
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'lead.archived', new_value: { reason: 'cleanup' } }),
+    );
+  });
+});
+
+describe('LeadService.changeStatus', () => {
+  it('rejects a no-op transition to the same status', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: baseLead({ status: 'new' }) }),
+    );
+
+    await expect(
+      LeadService.changeStatus(LEAD_ID, { new_status: 'new' }, makeCtx()),
+    ).rejects.toThrow(BusinessRuleError);
+  });
+
+  it('never allows "converted" as a changeStatus target, even with a reason', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: baseLead({ status: 'screened' }) }),
+    );
+
+    await expect(
+      LeadService.changeStatus(
+        LEAD_ID,
+        { new_status: 'converted', reason: 'trying to bypass conversion' },
+        makeCtx(),
+      ),
+    ).rejects.toThrow(/Convert to Subject action/);
+  });
+
+  it('allows a normal transition without requiring a reason', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient(
+        { data: baseLead({ status: 'new' }) },
+        { data: baseLead({ status: 'contacted' }) },
+        { data: null }, // lead_status_history insert
+      ),
+    );
+
+    const updated = await LeadService.changeStatus(LEAD_ID, { new_status: 'contacted' }, makeCtx());
+
+    expect(updated.status).toBe('contacted');
+  });
+
+  it('rejects an exceptional (non-normal) transition without a reason', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: baseLead({ status: 'new' }) }),
+    );
+
+    await expect(
+      LeadService.changeStatus(LEAD_ID, { new_status: 'screened' }, makeCtx()),
+    ).rejects.toThrow(BusinessRuleError);
+  });
+
+  it('allows an exceptional transition when a reason is supplied, and records it in history', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const client = makeSupabaseClient(
+      { data: baseLead({ status: 'new' }) },
+      { data: baseLead({ status: 'screened' }) },
+      { data: null }, // lead_status_history insert
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const updated = await LeadService.changeStatus(
+      LEAD_ID,
+      { new_status: 'screened', reason: 'sponsor fast-tracked this participant' },
+      makeCtx(),
+    );
+
+    expect(updated.status).toBe('screened');
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'lead.status_changed',
+        new_value: { status: 'screened', exceptional: true },
+      }),
+    );
+  });
+});
+
+describe('LeadService.logContact — do_not_contact guard', () => {
+  it('blocks logging a contact attempt on a do_not_contact lead without an override', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    // guardDangerousOperation calls hasPermission (not requirePermission) to
+    // check the override key — mocked false here to isolate the DNC-gate
+    // behavior from PermissionService's own RPC/fallback internals, which
+    // have their own dedicated coverage in tests/unit/PermissionService.test.ts.
+    vi.spyOn(PermissionService, 'hasPermission').mockResolvedValue(false);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: baseLead({ do_not_contact: true }) }),
+    );
+
+    await expect(
+      LeadService.logContact(LEAD_ID, { new_status: 'contacted' }, makeCtx()),
+    ).rejects.toThrow(BusinessRuleError);
+  });
+
+  it('allows logging a contact attempt on a do_not_contact lead with override permission and a reason', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(PermissionService, 'hasPermission').mockResolvedValue(true);
+    const client = makeSupabaseClient(
+      { data: baseLead({ do_not_contact: true, status: 'new' }) },
+      { data: baseLead({ do_not_contact: true, status: 'contacted' }) },
+      { data: null }, // lead_contact_log insert
+      { data: null }, // lead_status_history insert
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const updated = await LeadService.logContact(
+      LEAD_ID,
+      { new_status: 'contacted', override_reason: 'family member confirmed it is OK to call' },
+      makeCtx(),
+    );
+
+    expect(updated.status).toBe('contacted');
+  });
+});
+
+describe('LeadService notes — author-only edit', () => {
+  it('addNote requires create_lead_note', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('create_lead_note'),
+    );
+
+    await expect(
+      LeadService.addNote(LEAD_ID, { body: 'Called, left voicemail' }, makeCtx()),
+    ).rejects.toThrow(PermissionDeniedError);
+  });
+
+  it('updateNote throws NotFoundError when the note does not exist in this lead/company', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(makeSupabaseClient({ data: null }));
+
+    await expect(
+      LeadService.updateNote(LEAD_ID, 'note-uuid', { body: 'edited' }, makeCtx()),
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it('updateNote rejects editing a note created by a different user', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: { id: 'note-uuid', created_by: 'someone-else' } }),
+    );
+
+    await expect(
+      LeadService.updateNote(LEAD_ID, 'note-uuid', { body: 'edited' }, makeCtx()),
+    ).rejects.toThrow(/only edit your own notes/);
+  });
+});
+
+describe('LeadService.list', () => {
+  it('excludes archived leads by default', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const client = makeSupabaseClient({ data: [] });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await LeadService.list({}, makeCtx());
+
+    const queryStubInstance = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock
+      .results[0]!.value as { is: ReturnType<typeof vi.fn> };
+    expect(queryStubInstance.is).toHaveBeenCalledWith('archived_at', null);
+  });
+
+  it('does not filter out archived leads when include_archived is set', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const client = makeSupabaseClient({ data: [] });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await LeadService.list({ include_archived: true }, makeCtx());
+
+    const queryStubInstance = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock
+      .results[0]!.value as { is: ReturnType<typeof vi.fn> };
+    expect(queryStubInstance.is).not.toHaveBeenCalled();
   });
 });

@@ -2,11 +2,12 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { NotFoundError, DatabaseError } from '@/lib/api/errors';
+import { normalizePhone, normalizeEmail } from '@/lib/utils/leadNormalization';
 import type { LeadContactInfo, UpsertLeadContactInfoInput } from '@/types/recruitment';
 import type { RequestContext } from '@/types/api';
 
 const CONTACT_INFO_COLUMNS =
-  'id, company_id, site_id, lead_id, first_name, last_name, date_of_birth, sex, phone_primary, phone_secondary, email, preferred_contact_method, created_by, updated_by, created_at, updated_at';
+  'id, company_id, site_id, lead_id, first_name, middle_name, last_name, preferred_name, date_of_birth, sex, gender_identity, preferred_language, phone_primary, phone_secondary, email, address_line_1, address_line_2, city, state, postal_code, country, preferred_contact_method, created_by, updated_by, created_at, updated_at';
 
 // Deliberately queries `leads` directly rather than LeadService.getById —
 // that method requires 'view_leads', a separate permission a PHI-only user
@@ -67,13 +68,27 @@ export const LeadContactService = {
 
     const payload = {
       first_name: input.first_name,
+      middle_name: input.middle_name ?? null,
       last_name: input.last_name,
+      preferred_name: input.preferred_name ?? null,
       date_of_birth: input.date_of_birth ?? null,
       sex: input.sex ?? null,
+      gender_identity: input.gender_identity ?? null,
+      preferred_language: input.preferred_language ?? null,
       phone_primary: input.phone_primary,
       phone_secondary: input.phone_secondary ?? null,
       email: input.email ?? null,
+      address_line_1: input.address_line_1 ?? null,
+      address_line_2: input.address_line_2 ?? null,
+      city: input.city ?? null,
+      state: input.state ?? null,
+      postal_code: input.postal_code ?? null,
+      country: input.country ?? null,
       preferred_contact_method: input.preferred_contact_method,
+      // Duplicate-detection fields only — never displayed, the entered
+      // values above remain the source of truth for display.
+      normalized_phone: normalizePhone(input.phone_primary),
+      normalized_email: input.email ? normalizeEmail(input.email) : null,
     };
 
     const isCreate = !existing;
