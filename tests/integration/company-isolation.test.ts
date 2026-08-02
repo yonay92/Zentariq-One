@@ -68,6 +68,7 @@ function makeTrackingClient(data: unknown = [], error: unknown = null) {
     limit: vi.fn().mockReturnThis(),
     gte: vi.fn().mockReturnThis(),
     lte: vi.fn().mockReturnThis(),
+    is: vi.fn().mockReturnThis(),
     maybeSingle: vi
       .fn()
       .mockResolvedValue({ data: Array.isArray(data) ? (data[0] ?? null) : data, error }),
@@ -464,6 +465,69 @@ describe('LeadService — company isolation', () => {
     for (const call of companyEqCalls) {
       expect(call[1]).toBe(COMPANY_A);
     }
+  });
+
+  // do_not_contact: false so guardDangerousOperation short-circuits before
+  // ever calling PermissionService.hasPermission — not what these tests are
+  // checking (see the dedicated DNC-guard coverage in LeadService.test.ts).
+  const scopedLead = {
+    id: 'lead-other-company',
+    site_id: null,
+    study_id: null,
+    status: 'new',
+    do_not_contact: false,
+  };
+
+  it('addNote() scopes the lead lookup to company_id from context', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const { client, eqCalls } = makeTrackingClient(scopedLead);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await LeadService.addNote('lead-other-company', { body: 'note' }, makeCtx(COMPANY_A));
+
+    const companyEqCalls = eqCalls.filter(([col]) => col === 'company_id');
+    expect(companyEqCalls.length).toBeGreaterThanOrEqual(1);
+    for (const call of companyEqCalls) expect(call[1]).toBe(COMPANY_A);
+  });
+
+  it('logCall() scopes the lead lookup to company_id from context', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const { client, eqCalls } = makeTrackingClient(scopedLead);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await LeadService.logCall(
+      'lead-other-company',
+      { direction: 'outbound', outcome: 'answered', started_at: new Date().toISOString() },
+      makeCtx(COMPANY_A),
+    );
+
+    const companyEqCalls = eqCalls.filter(([col]) => col === 'company_id');
+    expect(companyEqCalls.length).toBeGreaterThanOrEqual(1);
+    for (const call of companyEqCalls) expect(call[1]).toBe(COMPANY_A);
+  });
+
+  it('createTask() scopes the lead lookup to company_id from context', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const { client, eqCalls } = makeTrackingClient(scopedLead);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await LeadService.createTask('lead-other-company', { title: 'Follow up' }, makeCtx(COMPANY_A));
+
+    const companyEqCalls = eqCalls.filter(([col]) => col === 'company_id');
+    expect(companyEqCalls.length).toBeGreaterThanOrEqual(1);
+    for (const call of companyEqCalls) expect(call[1]).toBe(COMPANY_A);
+  });
+
+  it('getStatusHistory() scopes the query to company_id from context', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const { client, eqCalls } = makeTrackingClient(scopedLead);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await LeadService.getStatusHistory('lead-other-company', makeCtx(COMPANY_A));
+
+    const companyEqCalls = eqCalls.filter(([col]) => col === 'company_id');
+    expect(companyEqCalls.length).toBeGreaterThanOrEqual(1);
+    for (const call of companyEqCalls) expect(call[1]).toBe(COMPANY_A);
   });
 });
 

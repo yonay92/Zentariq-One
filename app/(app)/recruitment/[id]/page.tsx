@@ -8,21 +8,13 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { LeadContactInfoSection } from '@/components/recruitment/LeadContactInfoSection';
 import { LeadActionsPanel } from '@/components/recruitment/LeadActionsPanel';
 import { LeadPrescreeningSection } from '@/components/recruitment/LeadPrescreeningSection';
-import type { Lead, LeadStatus } from '@/types/recruitment';
+import { LeadNotesSection } from '@/components/recruitment/LeadNotesSection';
+import { LeadCallsSection } from '@/components/recruitment/LeadCallsSection';
+import { LeadTasksSection } from '@/components/recruitment/LeadTasksSection';
+import { LEAD_STATUS_VARIANT } from '@/components/recruitment/leadStatusVariant';
+import type { Lead } from '@/types/recruitment';
 import type { Study } from '@/types/studies';
 import type { Site } from '@/types/sites';
-
-type BadgeVariant = 'success' | 'warning' | 'danger' | 'default' | 'primary' | 'info';
-
-const STATUS_VARIANT: Record<LeadStatus, BadgeVariant> = {
-  new: 'default',
-  contacted: 'info',
-  prescreening: 'primary',
-  waitlisted: 'warning',
-  converted: 'success',
-  declined: 'danger',
-  lost: 'danger',
-};
 
 export default function LeadProfilePage({ params }: { params: Promise<{ id: string }> }) {
   const { id: leadId } = use(params);
@@ -92,7 +84,7 @@ export default function LeadProfilePage({ params }: { params: Promise<{ id: stri
         title={lead.initials ?? 'Lead'}
         description={`${studyName} · ${siteName}`}
         action={
-          <Badge variant={STATUS_VARIANT[lead.status]}>{lead.status.replace(/_/g, ' ')}</Badge>
+          <Badge variant={LEAD_STATUS_VARIANT[lead.status]}>{lead.status.replace(/_/g, ' ')}</Badge>
         }
       />
 
@@ -118,12 +110,15 @@ export default function LeadProfilePage({ params }: { params: Promise<{ id: stri
           <LeadContactInfoSection leadId={lead.id} onSaved={() => void fetchLead()} />
           <LeadActionsPanel lead={lead} onChanged={() => void fetchLead()} />
         </div>
-        <div>
+        <div className="space-y-4">
           <LeadPrescreeningSection
             leadId={lead.id}
             defaultStudyId={lead.study_id}
             onChanged={() => void fetchLead()}
           />
+          <LeadTasksSection lead={lead} />
+          <LeadCallsSection lead={lead} />
+          <LeadNotesSection leadId={lead.id} />
         </div>
       </div>
     </div>

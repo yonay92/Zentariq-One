@@ -424,13 +424,28 @@ export const listInvitationsSchema = z.object({
 
 const LEAD_STATUSES = [
   'new',
+  'contact_attempted',
   'contacted',
+  'voicemail_left',
+  'interested',
+  'not_interested',
   'prescreening',
+  'prescreen_scheduled',
+  'prescreen_in_progress',
+  'prescreen_complete',
+  'qualified',
+  'not_qualified',
+  'screening_scheduled',
+  'screened',
+  'screen_failed',
+  'withdrawn',
   'waitlisted',
   'converted',
   'declined',
   'lost',
 ] as const;
+
+const LEAD_PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const;
 
 export const createLeadSchema = z.object({
   site_id: z.string().uuid().optional(),
@@ -444,6 +459,12 @@ export const updateLeadSchema = z.object({
   site_id: z.string().uuid().nullable().optional(),
   study_id: z.string().uuid().nullable().optional(),
   referral_source_id: z.string().uuid().nullable().optional(),
+  priority: z.enum(LEAD_PRIORITIES).optional(),
+  source_detail: z.string().max(500).trim().nullable().optional(),
+  notes_summary: z.string().max(2000).trim().nullable().optional(),
+  consent_to_contact: z.boolean().optional(),
+  do_not_contact: z.boolean().optional(),
+  do_not_contact_reason: z.string().max(1000).trim().nullable().optional(),
 });
 
 export type UpdateLeadSchema = z.infer<typeof updateLeadSchema>;
@@ -453,6 +474,9 @@ export const listLeadsSchema = z.object({
   site_id: z.string().uuid().optional(),
   study_id: z.string().uuid().optional(),
   referral_source_id: z.string().uuid().optional(),
+  priority: z.enum(LEAD_PRIORITIES).optional(),
+  assigned_user_id: z.string().uuid().optional(),
+  include_archived: z.coerce.boolean().optional(),
 });
 
 export const logLeadContactSchema = z.object({
@@ -460,6 +484,7 @@ export const logLeadContactSchema = z.object({
   contact_method: z.enum(['phone', 'email', 'sms']).optional(),
   notes: z.string().max(2000).trim().optional(),
   next_contact_at: z.string().datetime().optional(),
+  override_reason: z.string().max(1000).trim().optional(),
 });
 
 export type LogLeadContactSchema = z.infer<typeof logLeadContactSchema>;
@@ -481,20 +506,156 @@ export const convertLeadSchema = z.object({
 
 export type ConvertLeadSchema = z.infer<typeof convertLeadSchema>;
 
+export const assignLeadSchema = z.object({
+  assigned_user_id: z.string().uuid().nullable(),
+});
+
+export type AssignLeadSchema = z.infer<typeof assignLeadSchema>;
+
+export const archiveLeadSchema = z.object({
+  reason: z.string().max(1000).trim().optional(),
+});
+
+export type ArchiveLeadSchema = z.infer<typeof archiveLeadSchema>;
+
+export const changeLeadStatusSchema = z.object({
+  new_status: z.enum(LEAD_STATUSES),
+  reason: z.string().max(1000).trim().optional(),
+});
+
+export type ChangeLeadStatusSchema = z.infer<typeof changeLeadStatusSchema>;
+
 // ── Recruitment: Lead Contact Info (PHI) ──────────────────────────────────────
 
 export const upsertLeadContactInfoSchema = z.object({
   first_name: z.string().min(1, 'First name is required').max(200).trim(),
+  middle_name: z.string().max(200).trim().optional(),
   last_name: z.string().min(1, 'Last name is required').max(200).trim(),
+  preferred_name: z.string().max(200).trim().optional(),
   date_of_birth: z.string().date().optional(),
   sex: z.string().max(50).trim().optional(),
+  gender_identity: z.string().max(50).trim().optional(),
+  preferred_language: z.string().max(100).trim().optional(),
   phone_primary: z.string().min(1, 'Primary phone is required').max(20).trim(),
   phone_secondary: z.string().max(20).trim().optional(),
   email: z.string().email('Invalid email address').toLowerCase().trim().optional(),
+  address_line_1: z.string().max(200).trim().optional(),
+  address_line_2: z.string().max(200).trim().optional(),
+  city: z.string().max(100).trim().optional(),
+  state: z.string().max(100).trim().optional(),
+  postal_code: z.string().max(20).trim().optional(),
+  country: z.string().max(100).trim().optional(),
   preferred_contact_method: z.enum(['phone', 'email', 'sms']),
 });
 
 export type UpsertLeadContactInfoSchema = z.infer<typeof upsertLeadContactInfoSchema>;
+
+// ── Recruitment: Duplicate Detection ──────────────────────────────────────────
+
+export const checkDuplicatesSchema = z
+  .object({
+    phone: z.string().max(20).trim().optional(),
+    email: z.string().email('Invalid email address').toLowerCase().trim().optional(),
+    first_name: z.string().max(200).trim().optional(),
+    last_name: z.string().max(200).trim().optional(),
+    date_of_birth: z.string().date().optional(),
+    postal_code: z.string().max(20).trim().optional(),
+  })
+  .refine(
+    (v) =>
+      v.phone ??
+      v.email ??
+      (v.first_name && v.last_name ? (v.date_of_birth ?? v.postal_code) : undefined),
+    {
+      message:
+        'Provide a phone, an email, or a first and last name plus date of birth or postal code',
+    },
+  );
+
+export type CheckDuplicatesSchema = z.infer<typeof checkDuplicatesSchema>;
+
+// ── Recruitment: Lead Notes ────────────────────────────────────────────────
+
+const LEAD_NOTE_TYPES = ['general', 'call_summary', 'eligibility', 'follow_up', 'other'] as const;
+
+export const createLeadNoteSchema = z.object({
+  note_type: z.enum(LEAD_NOTE_TYPES).optional(),
+  body: z.string().min(1, 'Note body is required').max(5000).trim(),
+  is_private: z.boolean().optional(),
+});
+
+export type CreateLeadNoteSchema = z.infer<typeof createLeadNoteSchema>;
+
+export const updateLeadNoteSchema = z.object({
+  note_type: z.enum(LEAD_NOTE_TYPES).optional(),
+  body: z.string().min(1, 'Note body is required').max(5000).trim().optional(),
+  is_private: z.boolean().optional(),
+});
+
+export type UpdateLeadNoteSchema = z.infer<typeof updateLeadNoteSchema>;
+
+// ── Recruitment: Lead Calls ────────────────────────────────────────────────
+
+const CALL_DIRECTIONS = ['inbound', 'outbound'] as const;
+const CALL_OUTCOMES = [
+  'answered',
+  'no_answer',
+  'voicemail_left',
+  'busy',
+  'wrong_number',
+  'disconnected',
+  'interested',
+  'not_interested',
+  'callback_requested',
+  'scheduled',
+  'other',
+] as const;
+
+export const logLeadCallSchema = z
+  .object({
+    direction: z.enum(CALL_DIRECTIONS),
+    outcome: z.enum(CALL_OUTCOMES),
+    started_at: z.string().datetime(),
+    ended_at: z.string().datetime().optional(),
+    duration_seconds: z.number().int().min(0).max(86400).optional(),
+    phone_number: z.string().max(20).trim().optional(),
+    summary: z.string().max(5000).trim().optional(),
+    follow_up_required: z.boolean().optional(),
+    follow_up_at: z.string().datetime().optional(),
+    override_reason: z.string().max(1000).trim().optional(),
+  })
+  .refine((v) => !v.ended_at || new Date(v.ended_at) >= new Date(v.started_at), {
+    message: 'Call end time must be at or after the start time',
+    path: ['ended_at'],
+  });
+
+export type LogLeadCallSchema = z.infer<typeof logLeadCallSchema>;
+
+// ── Recruitment: Lead Tasks ────────────────────────────────────────────────
+
+const LEAD_TASK_STATUSES = ['open', 'in_progress', 'completed', 'cancelled'] as const;
+
+export const createLeadTaskSchema = z.object({
+  title: z.string().min(1, 'Title is required').max(300).trim(),
+  description: z.string().max(2000).trim().optional(),
+  priority: z.enum(LEAD_PRIORITIES).optional(),
+  assigned_user_id: z.string().uuid().optional(),
+  due_at: z.string().datetime().optional(),
+  override_reason: z.string().max(1000).trim().optional(),
+});
+
+export type CreateLeadTaskSchema = z.infer<typeof createLeadTaskSchema>;
+
+export const updateLeadTaskSchema = z.object({
+  title: z.string().min(1).max(300).trim().optional(),
+  description: z.string().max(2000).trim().nullable().optional(),
+  status: z.enum(LEAD_TASK_STATUSES).optional(),
+  priority: z.enum(LEAD_PRIORITIES).optional(),
+  assigned_user_id: z.string().uuid().nullable().optional(),
+  due_at: z.string().datetime().nullable().optional(),
+});
+
+export type UpdateLeadTaskSchema = z.infer<typeof updateLeadTaskSchema>;
 
 // ── Recruitment: Referral Sources ─────────────────────────────────────────────
 

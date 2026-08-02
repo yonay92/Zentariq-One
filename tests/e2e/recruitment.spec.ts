@@ -30,6 +30,13 @@ const runId = Date.now();
 const STUDY_NAME = `E2E Recruitment Study ${runId}`;
 const ELIGIBILITY_QUESTION = `Is the patient 18 or older? (${runId})`;
 const SUBJECT_NUMBER = `E2E-REC-${runId}`;
+// Run-scoped so a repeat run of this spec never collides with a lead left
+// over from a previous run — with duplicate detection now live, a fixed
+// literal name/phone across runs would trip the duplicate-warning gate on
+// every run's very first save.
+const LEAD_LAST_NAME = `Rivera${runId}`;
+const LEAD_FULL_NAME = `Jordan ${LEAD_LAST_NAME}`;
+const LEAD_PHONE = `555-${String(runId).slice(-7, -4)}-${String(runId).slice(-4)}`;
 
 let studyId = '';
 let leadId = '';
@@ -104,20 +111,90 @@ test.describe.serial('Recruitment & Patient Management', () => {
       await expect(page.getByRole('heading', { name: 'Restricted' })).not.toBeVisible();
 
       await page.getByLabel('First Name').fill('Jordan');
-      await page.getByLabel('Last Name').fill('Rivera');
+      await page.getByLabel('Last Name').fill(LEAD_LAST_NAME);
       // Both required before conversion — subject_contact_info needs them
       // NOT NULL even though they're optional at the recruitment stage.
       await page.getByLabel('Date of Birth (optional)').fill('1985-06-15');
       await page.getByLabel('Sex (optional)').fill('Female');
-      await page.getByLabel('Primary Phone').fill('555-222-3333');
-      await page.getByRole('button', { name: 'Save' }).click();
+      await page.getByLabel('Primary Phone').fill(LEAD_PHONE);
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
 
       // exact: true — "Add Contact Information" (the form heading, still
       // mounted for a moment during the transition) contains this string too.
       await expect(
         page.getByRole('heading', { name: 'Contact Information', exact: true }),
       ).toBeVisible();
-      await expect(page.getByText('Jordan Rivera')).toBeVisible();
+      await expect(page.getByText(LEAD_FULL_NAME)).toBeVisible();
+    });
+
+    test('assigns the lead to a user', async ({ page }) => {
+      await page.goto(`/recruitment/${leadId}`);
+      await page.getByRole('button', { name: 'Assign' }).click();
+      // The seeded Administrator fixture is always a valid assignment target
+      // — no second-user fixture is required for this check.
+      await page.getByLabel('Assigned to').selectOption({ index: 1 });
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(page.getByRole('button', { name: 'Reassign' })).toBeVisible({ timeout: 10000 });
+    });
+
+    test('adds a note', async ({ page }) => {
+      await page.goto(`/recruitment/${leadId}`);
+      await page.getByPlaceholder('Add a note…').fill(`E2E note ${runId}`);
+      await page.getByRole('button', { name: 'Add Note' }).click();
+      await expect(page.getByText(`E2E note ${runId}`)).toBeVisible({ timeout: 10000 });
+    });
+
+    test('logs a call', async ({ page }) => {
+      await page.goto(`/recruitment/${leadId}`);
+      await page.getByRole('button', { name: 'Log Call' }).click();
+      await page.getByLabel('Outcome').selectOption('answered');
+      // Scoped to exact "Save" inside the modal — "Save Anyway"/other Save
+      // buttons on the page would otherwise ambiguously match.
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(page.getByText('outbound · answered')).toBeVisible({ timeout: 10000 });
+    });
+
+    test('creates and completes a task', async ({ page }) => {
+      await page.goto(`/recruitment/${leadId}`);
+      await page.getByRole('button', { name: 'New Task' }).click();
+      await page.getByLabel('Title').fill(`E2E follow-up ${runId}`);
+      await page.getByRole('button', { name: 'Create' }).click();
+
+      await expect(page.getByText(`E2E follow-up ${runId}`)).toBeVisible({ timeout: 10000 });
+      await page.getByRole('button', { name: 'Complete' }).click();
+      // Completed tasks render with a strikethrough and lose their Complete
+      // button — asserting the button is gone confirms the state actually
+      // changed, not just that the click didn't error.
+      await expect(page.getByRole('button', { name: 'Complete' })).not.toBeVisible({
+        timeout: 10000,
+      });
+    });
+
+    test('detects a possible duplicate by matching contact info, and does not silently block or merge', async ({
+      page,
+      request,
+    }) => {
+      const dupRes = await request.post('/api/leads', { data: {} });
+      const dupLeadId = ((await dupRes.json()) as { data: { id: string } }).data.id;
+
+      await page.goto(`/recruitment/${dupLeadId}`);
+      // Same name/DOB/phone as the lead created earlier in this file — a
+      // real duplicate by every match rule.
+      await page.getByLabel('First Name').fill('Jordan');
+      await page.getByLabel('Last Name').fill(LEAD_LAST_NAME);
+      await page.getByLabel('Date of Birth (optional)').fill('1985-06-15');
+      await page.getByLabel('Primary Phone').fill(LEAD_PHONE);
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+      await expect(page.getByText(/possible existing lead/)).toBeVisible({ timeout: 10000 });
+      await expect(page.getByText('same name and date of birth', { exact: false })).toBeVisible();
+
+      // Not a hard block — the duplicate is never silently merged, the
+      // caller explicitly confirms and the record is created as its own row.
+      await page.getByRole('button', { name: 'Save Anyway' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Contact Information', exact: true }),
+      ).toBeVisible({ timeout: 10000 });
     });
 
     test('submits a prescreening and the outcome is scored automatically', async ({ page }) => {
@@ -150,7 +227,72 @@ test.describe.serial('Recruitment & Patient Management', () => {
       await subjectLink.click();
       await expect(page).toHaveURL(/\/subjects\/[0-9a-f-]{36}$/);
       await page.getByRole('button', { name: 'Contact Info' }).click();
-      await expect(page.getByText('Jordan Rivera')).toBeVisible({ timeout: 10000 });
+      await expect(page.getByText(LEAD_FULL_NAME)).toBeVisible({ timeout: 10000 });
+    });
+  });
+
+  // Uses its own throwaway lead rather than the primary leadId above — status
+  // transitions and archiving must never risk interfering with the primary
+  // lead's prescreening/conversion flow still running in the describe block
+  // above (archiving in particular hides the Convert to Subject action).
+  test.describe('Admin: status transitions and archiving', () => {
+    test.use({ storageState: ADMIN_STATE });
+    let statusLeadId = '';
+
+    test('changes status through a valid transition without a reason', async ({ request }) => {
+      const res = await request.post('/api/leads', { data: {} });
+      statusLeadId = ((await res.json()) as { data: { id: string } }).data.id;
+
+      const statusRes = await request.post(`/api/leads/${statusLeadId}/status`, {
+        data: { new_status: 'contact_attempted' },
+      });
+      expect(statusRes.ok()).toBe(true);
+      const body = (await statusRes.json()) as { data: { status: string } };
+      expect(body.data.status).toBe('contact_attempted');
+    });
+
+    test('rejects an invalid (non-normal) transition without a reason', async ({ request }) => {
+      // contact_attempted -> screened is not a normal transition and no
+      // reason is supplied — must be rejected, not silently applied.
+      const res = await request.post(`/api/leads/${statusLeadId}/status`, {
+        data: { new_status: 'screened' },
+      });
+      expect(res.status()).toBe(422);
+      const body = (await res.json()) as { error: { message: string } };
+      expect(body.error.message).toMatch(/not a normal transition/);
+    });
+
+    test('allows the same exceptional transition once a reason is supplied', async ({
+      request,
+    }) => {
+      const res = await request.post(`/api/leads/${statusLeadId}/status`, {
+        data: { new_status: 'screened', reason: 'sponsor fast-tracked this participant' },
+      });
+      expect(res.ok()).toBe(true);
+      const body = (await res.json()) as { data: { status: string } };
+      expect(body.data.status).toBe('screened');
+    });
+
+    test('archives the lead and excludes it from the default active list', async ({
+      page,
+      request,
+    }) => {
+      const archiveRes = await request.fetch(`/api/leads/${statusLeadId}`, {
+        method: 'DELETE',
+        data: {},
+      });
+      expect(archiveRes.ok()).toBe(true);
+
+      const listRes = await request.get('/api/leads');
+      const activeLeads = ((await listRes.json()) as { data: Array<{ id: string }> }).data;
+      expect(activeLeads.some((l) => l.id === statusLeadId)).toBe(false);
+
+      const includeArchivedRes = await request.get('/api/leads?include_archived=true');
+      const allLeads = ((await includeArchivedRes.json()) as { data: Array<{ id: string }> }).data;
+      expect(allLeads.some((l) => l.id === statusLeadId)).toBe(true);
+
+      await page.goto(`/recruitment/${statusLeadId}`);
+      await expect(page.getByText('This lead is archived.')).toBeVisible();
     });
   });
 
@@ -163,14 +305,14 @@ test.describe.serial('Recruitment & Patient Management', () => {
       // The pipeline list itself never renders raw contact fields — only
       // initials, study/site, status, and attempt count — so no PHI value
       // should ever appear here, only the auto-generated initials.
-      await expect(page.getByText('Jordan Rivera')).not.toBeVisible();
+      await expect(page.getByText(LEAD_FULL_NAME)).not.toBeVisible();
     });
 
     test('Contact Info is restricted on the lead detail page', async ({ page }) => {
       await page.goto(`/recruitment/${leadId}`);
       await expect(page.getByRole('heading', { name: 'Restricted' })).toBeVisible();
-      await expect(page.getByText('Jordan Rivera')).not.toBeVisible();
-      await expect(page.getByText('555-222-3333')).not.toBeVisible();
+      await expect(page.getByText(LEAD_FULL_NAME)).not.toBeVisible();
+      await expect(page.getByText(LEAD_PHONE)).not.toBeVisible();
     });
   });
 });

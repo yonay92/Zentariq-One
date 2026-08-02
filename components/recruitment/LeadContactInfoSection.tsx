@@ -10,6 +10,8 @@ import { usePermissions } from '@/hooks/usePermissions';
 import type {
   LeadPreferredContactMethod,
   LeadContactInfo as ContactInfo,
+  DuplicateMatch,
+  DuplicateMatchReason,
 } from '@/types/recruitment';
 
 const CONTACT_METHOD_OPTIONS: Array<{ value: LeadPreferredContactMethod; label: string }> = [
@@ -17,6 +19,13 @@ const CONTACT_METHOD_OPTIONS: Array<{ value: LeadPreferredContactMethod; label: 
   { value: 'email', label: 'Email' },
   { value: 'sms', label: 'SMS' },
 ];
+
+const DUPLICATE_REASON_LABEL: Record<DuplicateMatchReason, string> = {
+  phone_match: 'same phone number',
+  email_match: 'same email address',
+  name_dob_match: 'same name and date of birth',
+  name_postal_code_match: 'same name and postal code',
+};
 
 type FormState = {
   first_name: string;
@@ -70,6 +79,7 @@ export function LeadContactInfoSection({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
 
   const fetchContactInfo = useCallback(async () => {
     setLoading(true);
@@ -91,7 +101,41 @@ export function LeadContactInfoSection({
     else setLoading(false);
   }, [canView, fetchContactInfo]);
 
-  async function handleSave() {
+  async function handleSave(skipDuplicateCheck = false) {
+    // Duplicate detection only makes sense for a genuinely new person's
+    // record — never re-run once contact info already exists, and never
+    // silently block or merge (business rule): a match is a warning the
+    // caller must explicitly acknowledge via "Save Anyway", not a hard stop.
+    // skipDuplicateCheck (rather than reading the duplicatesAcknowledged
+    // state) avoids a stale-closure read on the very call that sets it.
+    if (!contactInfo && !skipDuplicateCheck) {
+      try {
+        const dupRes = await fetch('/api/leads/check-duplicates', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            phone: form.phone_primary.trim() || undefined,
+            email: form.email.trim() || undefined,
+            first_name: form.first_name.trim() || undefined,
+            last_name: form.last_name.trim() || undefined,
+            date_of_birth: form.date_of_birth || undefined,
+          }),
+        });
+        if (dupRes.ok) {
+          const json = (await dupRes.json()) as {
+            data?: { possible_matches: DuplicateMatch[] };
+          };
+          const matches = json.data?.possible_matches ?? [];
+          if (matches.length > 0) {
+            setDuplicateMatches(matches);
+            return;
+          }
+        }
+      } catch {
+        // Duplicate check failing must never block saving real contact info.
+      }
+    }
+
     setSaving(true);
     setError(null);
     try {
@@ -117,6 +161,7 @@ export function LeadContactInfoSection({
       }
       setContactInfo(json.data ?? null);
       setEditing(false);
+      setDuplicateMatches([]);
       onSaved?.();
     } catch {
       setError('An unexpected error occurred');
@@ -255,6 +300,26 @@ export function LeadContactInfoSection({
           options={CONTACT_METHOD_OPTIONS}
         />
       </div>
+
+      {duplicateMatches.length > 0 && (
+        <div className="mt-3 rounded-md border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
+          <p className="mb-1 font-medium">
+            {duplicateMatches.length} possible existing lead
+            {duplicateMatches.length > 1 ? 's' : ''} matched this information:
+          </p>
+          <ul className="mb-2 list-disc pl-5">
+            {duplicateMatches.map((m) => (
+              <li key={m.lead_id}>
+                {m.initials ?? 'Lead'} — {m.status.replace(/_/g, ' ')}
+                {m.archived ? ' (archived)' : ''} —{' '}
+                {m.match_reasons.map((r) => DUPLICATE_REASON_LABEL[r]).join(', ')}
+              </li>
+            ))}
+          </ul>
+          <p>This is not automatically merged. Confirm this is a different person before saving.</p>
+        </div>
+      )}
+
       {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
       <div className="mt-4 flex justify-end gap-3">
         {contactInfo && (
@@ -262,9 +327,20 @@ export function LeadContactInfoSection({
             Cancel
           </Button>
         )}
-        <Button loading={saving} disabled={saving} onClick={() => void handleSave()}>
-          Save
-        </Button>
+        {duplicateMatches.length > 0 ? (
+          <Button
+            variant="danger"
+            loading={saving}
+            disabled={saving}
+            onClick={() => void handleSave(true)}
+          >
+            Save Anyway
+          </Button>
+        ) : (
+          <Button loading={saving} disabled={saving} onClick={() => void handleSave()}>
+            Save
+          </Button>
+        )}
       </div>
     </div>
   );
