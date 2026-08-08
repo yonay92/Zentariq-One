@@ -7,7 +7,13 @@ import { Modal } from '@/components/ui/Modal';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { usePermissions } from '@/hooks/usePermissions';
 import { LEAD_STATUS_VARIANT } from '@/components/recruitment/leadStatusVariant';
-import type { Lead, LeadContactLogEntry, LeadStatus } from '@/types/recruitment';
+import { ConversionReadiness } from '@/components/recruitment/ConversionReadiness';
+import type {
+  Lead,
+  LeadContactLogEntry,
+  LeadStatus,
+  ConversionReadiness as ConversionReadinessData,
+} from '@/types/recruitment';
 import type { Profile } from '@/types/users';
 
 const CONTACT_STATUS_OPTIONS: Array<{ value: LeadStatus; label: string }> = [
@@ -46,6 +52,9 @@ export function LeadActionsPanel({ lead, onChanged }: { lead: Lead; onChanged: (
 
   const [convertOpen, setConvertOpen] = useState(false);
   const [subjectNumber, setSubjectNumber] = useState('');
+  const [conversionReadiness, setConversionReadiness] = useState<ConversionReadinessData | null>(
+    null,
+  );
 
   const [statusOpen, setStatusOpen] = useState(false);
   const [newStatus, setNewStatus] = useState<LeadStatus>('contacted');
@@ -300,7 +309,14 @@ export function LeadActionsPanel({ lead, onChanged }: { lead: Lead; onChanged: (
                 </Button>
               )}
               {canConvert && (
-                <Button size="sm" variant="outline" onClick={() => setConvertOpen(true)}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setConversionReadiness(null);
+                    setConvertOpen(true);
+                  }}
+                >
                   Convert to Subject
                 </Button>
               )}
@@ -459,9 +475,9 @@ export function LeadActionsPanel({ lead, onChanged }: { lead: Lead; onChanged: (
         <div className="space-y-4">
           <p className="text-sm text-gray-500">
             This creates a real, enrolled Subject in the matched study using this lead&apos;s
-            contact information. Requires the lead to have a supporting prescreening for the matched
-            study (any outcome other than Not Eligible).
+            contact information.
           </p>
+          <ConversionReadiness leadId={lead.id} onReadinessChange={setConversionReadiness} />
           <div className="space-y-1">
             <label
               htmlFor="lead-subject-number"
@@ -484,7 +500,7 @@ export function LeadActionsPanel({ lead, onChanged }: { lead: Lead; onChanged: (
             </Button>
             <Button
               loading={busy}
-              disabled={busy || !subjectNumber.trim()}
+              disabled={busy || !subjectNumber.trim() || conversionReadiness?.can_convert === false}
               onClick={() => void handleConvert()}
             >
               Convert
