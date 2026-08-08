@@ -91,6 +91,7 @@ function queryStub(data: unknown, error: unknown = null) {
     is: vi.fn().mockReturnThis(),
     order: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
+    range: vi.fn().mockReturnThis(),
     insert: vi.fn().mockReturnThis(),
     update: vi.fn().mockReturnThis(),
     maybeSingle: vi.fn().mockResolvedValue({ data, error }),
@@ -99,7 +100,7 @@ function queryStub(data: unknown, error: unknown = null) {
     catch: resolved.catch.bind(resolved),
     finally: resolved.finally.bind(resolved),
   };
-  for (const key of ['select', 'eq', 'in', 'is', 'order', 'limit', 'insert', 'update']) {
+  for (const key of ['select', 'eq', 'in', 'is', 'order', 'limit', 'range', 'insert', 'update']) {
     (stub[key] as ReturnType<typeof vi.fn>).mockReturnValue(stub);
   }
   return stub;
@@ -403,6 +404,7 @@ describe('LeadService.assign', () => {
   it('assigns the lead and audits old and new owner', async () => {
     vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
     vi.spyOn(PermissionService, 'validateUserExists').mockResolvedValue({} as never);
+    vi.spyOn(PermissionService, 'canAccessSite').mockResolvedValue(true);
     vi.mocked(createServerSupabaseClient).mockResolvedValue(
       makeSupabaseClient(
         { data: baseLead({ assigned_user_id: null }) },
@@ -612,25 +614,31 @@ describe('LeadService notes — author-only edit', () => {
 describe('LeadService.list', () => {
   it('excludes archived leads by default', async () => {
     vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
-    const client = makeSupabaseClient({ data: [] });
+    // false skips the PHI-gated duplicate-warning computation entirely —
+    // not what this test is checking (see LeadDuplicateService's own tests).
+    vi.spyOn(PermissionService, 'hasPermission').mockResolvedValue(false);
+    // Two .from() calls in order: getOpenTaskInfo's lead_tasks query, then
+    // the main leads query this test inspects.
+    const client = makeSupabaseClient({ data: [] }, { data: [] });
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
     await LeadService.list({}, makeCtx());
 
     const queryStubInstance = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock
-      .results[0]!.value as { is: ReturnType<typeof vi.fn> };
+      .results[1]!.value as { is: ReturnType<typeof vi.fn> };
     expect(queryStubInstance.is).toHaveBeenCalledWith('archived_at', null);
   });
 
   it('does not filter out archived leads when include_archived is set', async () => {
     vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
-    const client = makeSupabaseClient({ data: [] });
+    vi.spyOn(PermissionService, 'hasPermission').mockResolvedValue(false);
+    const client = makeSupabaseClient({ data: [] }, { data: [] });
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
     await LeadService.list({ include_archived: true }, makeCtx());
 
     const queryStubInstance = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock
-      .results[0]!.value as { is: ReturnType<typeof vi.fn> };
+      .results[1]!.value as { is: ReturnType<typeof vi.fn> };
     expect(queryStubInstance.is).not.toHaveBeenCalled();
   });
 });

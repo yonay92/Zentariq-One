@@ -11,14 +11,27 @@ export async function GET(request: NextRequest) {
   if (!auth.ok) return errorResponse('UNAUTHORIZED', 401);
 
   const { searchParams } = request.nextUrl;
+  const statuses = searchParams.getAll('statuses');
   const validated = listLeadsSchema.safeParse({
     status: searchParams.get('status') ?? undefined,
+    statuses: statuses.length > 0 ? statuses : undefined,
     site_id: searchParams.get('site_id') ?? undefined,
     study_id: searchParams.get('study_id') ?? undefined,
     referral_source_id: searchParams.get('referral_source_id') ?? undefined,
     priority: searchParams.get('priority') ?? undefined,
     assigned_user_id: searchParams.get('assigned_user_id') ?? undefined,
     include_archived: searchParams.get('include_archived') ?? undefined,
+    search: searchParams.get('search') ?? undefined,
+    has_overdue_tasks: searchParams.get('has_overdue_tasks') ?? undefined,
+    has_duplicate_warning: searchParams.get('has_duplicate_warning') ?? undefined,
+    next_follow_up_from: searchParams.get('next_follow_up_from') ?? undefined,
+    next_follow_up_to: searchParams.get('next_follow_up_to') ?? undefined,
+    created_from: searchParams.get('created_from') ?? undefined,
+    created_to: searchParams.get('created_to') ?? undefined,
+    page: searchParams.get('page') ?? undefined,
+    page_size: searchParams.get('page_size') ?? undefined,
+    sort_by: searchParams.get('sort_by') ?? undefined,
+    sort_dir: searchParams.get('sort_dir') ?? undefined,
   });
   if (!validated.success) {
     return errorResponse('VALIDATION_ERROR', 400, { issues: validated.error.issues });

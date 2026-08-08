@@ -3,13 +3,18 @@ import { createAdminSupabaseClient } from '@/lib/supabase/admin';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { SubjectService } from '@/services/subjects/SubjectService';
+import { LeadDuplicateService } from '@/services/recruitment/LeadDuplicateService';
 import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
+import { PIPELINE_COLUMN_ORDER, getPipelineColumnForStatus } from '@/lib/utils/leadPipelineColumns';
 import type {
   Lead,
   LeadStatus,
+  LeadPriority,
   CreateLeadInput,
   UpdateLeadInput,
   ListLeadsFilters,
+  LeadListItem,
+  LeadListResult,
   AssignLeadInput,
   ArchiveLeadInput,
   ChangeLeadStatusInput,
@@ -25,6 +30,24 @@ import type {
   LeadTask,
   CreateLeadTaskInput,
   UpdateLeadTaskInput,
+  BulkActionResult,
+  BulkActionOutcome,
+  BulkAssignInput,
+  BulkUpdatePriorityInput,
+  BulkArchiveInput,
+  BulkCreateTaskInput,
+  BulkChangeStatusInput,
+  BulkChangeStatusPreview,
+  FollowUpQueueScope,
+  FollowUpQueueEntry,
+  WorkloadSummary,
+  WorkloadSummaryEntry,
+  ConversionReadiness,
+  ConversionReadinessItem,
+  ConversionReadinessItemKey,
+  PipelineCounts,
+  PipelineColumnKey,
+  ValidNextStatuses,
 } from '@/types/recruitment';
 import type { CreateSubjectInput } from '@/types/subjects';
 import type { RequestContext } from '@/types/api';
@@ -128,6 +151,38 @@ async function insertStatusHistory(
   });
 }
 
+// Single company-wide query (bounded by open/in_progress task volume, not
+// total lead count) that answers both "how many open tasks does lead X
+// have" and "which leads have an overdue task" — reused by list() for the
+// Lead Table's Open Tasks column and Has Overdue Tasks filter, so neither
+// needs its own per-row round trip (avoids N+1).
+async function getOpenTaskInfo(
+  supabase: SupabaseClient,
+  companyId: string,
+): Promise<{ openCountByLead: Map<string, number>; overdueLeadIds: Set<string> }> {
+  const { data, error } = await supabase
+    .from('lead_tasks')
+    .select('lead_id, due_at')
+    .eq('company_id', companyId)
+    .in('status', ['open', 'in_progress']);
+
+  if (error) throw new DatabaseError(error.message);
+
+  const openCountByLead = new Map<string, number>();
+  const overdueLeadIds = new Set<string>();
+  const now = Date.now();
+  for (const row of (data as Array<{ lead_id: string; due_at: string | null }>) ?? []) {
+    openCountByLead.set(row.lead_id, (openCountByLead.get(row.lead_id) ?? 0) + 1);
+    if (row.due_at && new Date(row.due_at).getTime() < now) overdueLeadIds.add(row.lead_id);
+  }
+  return { openCountByLead, overdueLeadIds };
+}
+
+function summarizeOutcomes(outcomes: BulkActionOutcome[]): BulkActionResult {
+  const succeeded_count = outcomes.filter((o) => o.succeeded).length;
+  return { outcomes, succeeded_count, skipped_count: outcomes.length - succeeded_count };
+}
+
 export const LeadService = {
   async create(input: CreateLeadInput, ctx: RequestContext): Promise<Lead> {
     await PermissionService.requirePermission(ctx.user.id, 'create_lead');
@@ -196,17 +251,40 @@ export const LeadService = {
     return (data as LeadContactLogEntry[]) ?? [];
   },
 
-  async list(filters: ListLeadsFilters, ctx: RequestContext): Promise<Lead[]> {
+  // Server-side paginated/sorted/filtered — the Lead Table's work-queue
+  // listing. Page size is always capped (see listLeadsSchema) so this can
+  // never become an unbounded query regardless of caller input.
+  async list(filters: ListLeadsFilters, ctx: RequestContext): Promise<LeadListResult> {
     await PermissionService.requirePermission(ctx.user.id, 'view_leads');
 
+    const page = filters.page && filters.page > 0 ? filters.page : 1;
+    const pageSize =
+      filters.page_size && filters.page_size > 0 ? Math.min(filters.page_size, 100) : 25;
+    const sortBy = filters.sort_by ?? 'created_at';
+    const sortDir = filters.sort_dir ?? 'desc';
+
     const supabase = await createServerSupabaseClient();
+
+    // has_duplicate_warning is PHI-adjacent (it reveals a phone/email is
+    // shared with another lead) — only computed for callers who could
+    // already see that via checkDuplicates. Non-PHI callers still get a
+    // normal list() result; the column is just always false for them and
+    // the filter (if requested) is silently a no-op rather than an error.
+    const canViewPhi = await PermissionService.hasPermission(ctx.user.id, 'view_lead_phi');
+    const duplicateWarningLeadIds = canViewPhi
+      ? await LeadDuplicateService.getLeadsWithActiveDuplicateWarnings(ctx)
+      : new Set<string>();
+
+    const { openCountByLead, overdueLeadIds } = await getOpenTaskInfo(supabase, ctx.company.id);
+
     let query = supabase
       .from('leads')
-      .select(LEAD_COLUMNS)
-      .eq('company_id', ctx.company.id)
-      .order('created_at', { ascending: false });
+      .select(LEAD_COLUMNS, { count: 'exact' })
+      .eq('company_id', ctx.company.id);
 
     if (filters.status) query = query.eq('status', filters.status);
+    if (filters.statuses && filters.statuses.length > 0)
+      query = query.in('status', filters.statuses);
     if (filters.site_id) query = query.eq('site_id', filters.site_id);
     if (filters.study_id) query = query.eq('study_id', filters.study_id);
     if (filters.referral_source_id)
@@ -216,10 +294,38 @@ export const LeadService = {
     // Archived leads never appear in default queries (business rule) — a
     // caller must explicitly ask for them.
     if (!filters.include_archived) query = query.is('archived_at', null);
+    // initials only — the one non-PHI identifying value on `leads` itself.
+    if (filters.search?.trim()) query = query.ilike('initials', `%${filters.search.trim()}%`);
+    if (filters.next_follow_up_from)
+      query = query.gte('next_contact_at', filters.next_follow_up_from);
+    if (filters.next_follow_up_to) query = query.lte('next_contact_at', filters.next_follow_up_to);
+    if (filters.created_from) query = query.gte('created_at', filters.created_from);
+    if (filters.created_to) query = query.lte('created_at', filters.created_to);
+    if (filters.has_overdue_tasks) {
+      const ids = Array.from(overdueLeadIds);
+      query = query.in('id', ids.length > 0 ? ids : ['00000000-0000-0000-0000-000000000000']);
+    }
+    if (filters.has_duplicate_warning && canViewPhi) {
+      const ids = Array.from(duplicateWarningLeadIds);
+      query = query.in('id', ids.length > 0 ? ids : ['00000000-0000-0000-0000-000000000000']);
+    }
 
-    const { data, error } = await query;
+    query = query
+      .order(sortBy, { ascending: sortDir === 'asc' })
+      .range((page - 1) * pageSize, page * pageSize - 1);
+
+    const { data, error, count } = await query;
     if (error) throw new DatabaseError(error.message);
-    return (data as Lead[]) ?? [];
+    const leads = (data as Lead[]) ?? [];
+
+    const items: LeadListItem[] = leads.map((lead) => ({
+      ...lead,
+      open_task_count: openCountByLead.get(lead.id) ?? 0,
+      has_overdue_task: overdueLeadIds.has(lead.id),
+      has_duplicate_warning: duplicateWarningLeadIds.has(lead.id),
+    }));
+
+    return { data: items, total: count ?? items.length, page, page_size: pageSize };
   },
 
   async update(leadId: string, input: UpdateLeadInput, ctx: RequestContext): Promise<Lead> {
@@ -280,6 +386,21 @@ export const LeadService = {
 
     if (input.assigned_user_id) {
       await PermissionService.validateUserExists(input.assigned_user_id, ctx.company.id);
+      // No cross-site assignment without permission: the assignee must be
+      // able to access the lead's site themselves (unassigned/pool leads
+      // have no site to check). view_all_sites-holders pass automatically —
+      // same rule canAccessSite already applies to the caller elsewhere.
+      if (lead.site_id) {
+        const assigneeHasSiteAccess = await PermissionService.canAccessSite(
+          input.assigned_user_id,
+          lead.site_id,
+        );
+        if (!assigneeHasSiteAccess) {
+          throw new BusinessRuleError(
+            'The selected user does not have access to this lead’s site.',
+          );
+        }
+      }
     }
 
     const supabase = await createServerSupabaseClient();
@@ -1114,5 +1235,562 @@ export const LeadService = {
     });
 
     return { lead: updatedLead as Lead, subject_id: subject.id };
+  },
+
+  async getValidNextStatuses(leadId: string, ctx: RequestContext): Promise<ValidNextStatuses> {
+    await PermissionService.requirePermission(ctx.user.id, 'view_leads');
+    const lead = await getLeadOrThrow(leadId, ctx);
+    return {
+      current_status: lead.status,
+      normal_next_statuses: STATUS_TRANSITIONS[lead.status] ?? [],
+      reason_required_for_others: true,
+    };
+  },
+
+  // ── Bulk actions ──────────────────────────────────────────────────────
+  // Every bulk method delegates to the existing single-lead method for each
+  // id — never reimplements a business rule. This also gives free
+  // defense-in-depth: bulk_manage_recruitment_leads is checked once here,
+  // and the delegated method still re-checks its own specific permission
+  // (edit_lead/assign_lead/archive_lead/manage_lead_tasks) per lead.
+
+  async bulkAssign(input: BulkAssignInput, ctx: RequestContext): Promise<BulkActionResult> {
+    await PermissionService.requirePermission(ctx.user.id, 'bulk_manage_recruitment_leads');
+
+    const outcomes: BulkActionOutcome[] = [];
+    for (const leadId of input.lead_ids) {
+      try {
+        await LeadService.assign(leadId, { assigned_user_id: input.assigned_user_id }, ctx);
+        outcomes.push({ lead_id: leadId, succeeded: true, reason: null });
+      } catch (err) {
+        outcomes.push({
+          lead_id: leadId,
+          succeeded: false,
+          reason: err instanceof Error ? err.message : 'Failed to assign lead',
+        });
+      }
+    }
+    return summarizeOutcomes(outcomes);
+  },
+
+  async bulkUpdatePriority(
+    input: BulkUpdatePriorityInput,
+    ctx: RequestContext,
+  ): Promise<BulkActionResult> {
+    await PermissionService.requirePermission(ctx.user.id, 'bulk_manage_recruitment_leads');
+
+    const outcomes: BulkActionOutcome[] = [];
+    for (const leadId of input.lead_ids) {
+      try {
+        await LeadService.update(leadId, { priority: input.priority }, ctx);
+        outcomes.push({ lead_id: leadId, succeeded: true, reason: null });
+      } catch (err) {
+        outcomes.push({
+          lead_id: leadId,
+          succeeded: false,
+          reason: err instanceof Error ? err.message : 'Failed to update priority',
+        });
+      }
+    }
+    return summarizeOutcomes(outcomes);
+  },
+
+  async bulkArchive(input: BulkArchiveInput, ctx: RequestContext): Promise<BulkActionResult> {
+    await PermissionService.requirePermission(ctx.user.id, 'bulk_manage_recruitment_leads');
+
+    const outcomes: BulkActionOutcome[] = [];
+    for (const leadId of input.lead_ids) {
+      try {
+        await LeadService.archive(leadId, { reason: input.reason }, ctx);
+        outcomes.push({ lead_id: leadId, succeeded: true, reason: null });
+      } catch (err) {
+        outcomes.push({
+          lead_id: leadId,
+          succeeded: false,
+          reason: err instanceof Error ? err.message : 'Failed to archive lead',
+        });
+      }
+    }
+    return summarizeOutcomes(outcomes);
+  },
+
+  // do_not_contact leads are skipped (not failed) unless override_reason is
+  // supplied — createTask's own guardDangerousOperation call enforces this
+  // per lead, so nothing extra is needed here.
+  async bulkCreateTask(input: BulkCreateTaskInput, ctx: RequestContext): Promise<BulkActionResult> {
+    await PermissionService.requirePermission(ctx.user.id, 'bulk_manage_recruitment_leads');
+
+    const outcomes: BulkActionOutcome[] = [];
+    for (const leadId of input.lead_ids) {
+      try {
+        await LeadService.createTask(
+          leadId,
+          {
+            title: input.title,
+            description: input.description,
+            priority: input.priority,
+            assigned_user_id: input.assigned_user_id,
+            due_at: input.due_at,
+            override_reason: input.override_reason,
+          },
+          ctx,
+        );
+        outcomes.push({ lead_id: leadId, succeeded: true, reason: null });
+      } catch (err) {
+        outcomes.push({
+          lead_id: leadId,
+          succeeded: false,
+          reason: err instanceof Error ? err.message : 'Failed to create task',
+        });
+      }
+    }
+    return summarizeOutcomes(outcomes);
+  },
+
+  // Read-only dry run — the UI's required pre-apply validation summary comes
+  // straight from this, never re-derived client-side. bulkChangeStatus
+  // re-validates from scratch at apply time regardless (never trusts this
+  // preview as authorization).
+  async previewBulkChangeStatus(
+    input: { lead_ids: string[]; new_status: LeadStatus },
+    ctx: RequestContext,
+  ): Promise<BulkChangeStatusPreview> {
+    await PermissionService.requirePermission(ctx.user.id, 'bulk_manage_recruitment_leads');
+
+    const supabase = await createServerSupabaseClient();
+    const { data, error } = await supabase
+      .from('leads')
+      .select('id, status')
+      .eq('company_id', ctx.company.id)
+      .in('id', input.lead_ids);
+    if (error) throw new DatabaseError(error.message);
+
+    const rows = (data as Array<{ id: string; status: LeadStatus }>) ?? [];
+    const statusById = new Map(rows.map((r) => [r.id, r.status]));
+
+    const eligible: string[] = [];
+    const ineligible: Array<{ lead_id: string; reason: string }> = [];
+
+    for (const leadId of input.lead_ids) {
+      const currentStatus = statusById.get(leadId);
+      if (!currentStatus) {
+        ineligible.push({ lead_id: leadId, reason: 'Lead not found' });
+        continue;
+      }
+      if (input.new_status === currentStatus) {
+        ineligible.push({ lead_id: leadId, reason: 'Already in that status' });
+        continue;
+      }
+      if (input.new_status === 'converted') {
+        ineligible.push({
+          lead_id: leadId,
+          reason: 'Use the Convert to Subject action instead',
+        });
+        continue;
+      }
+      // Bulk status changes only ever apply normal transitions — a single
+      // exceptional-transition reason cannot be assumed valid across a
+      // batch of leads that may be at different current statuses.
+      const allowedNext = STATUS_TRANSITIONS[currentStatus] ?? [];
+      if (!allowedNext.includes(input.new_status)) {
+        ineligible.push({
+          lead_id: leadId,
+          reason: `Not a normal transition from ${currentStatus.replace(/_/g, ' ')}`,
+        });
+      } else {
+        eligible.push(leadId);
+      }
+    }
+
+    return { eligible_lead_ids: eligible, ineligible, all_eligible: ineligible.length === 0 };
+  },
+
+  // All-or-nothing: rejects the entire batch if any selected lead is
+  // ineligible, per "do not allow bulk status transitions unless every
+  // selected Lead is eligible for that transition."
+  async bulkChangeStatus(
+    input: BulkChangeStatusInput,
+    ctx: RequestContext,
+  ): Promise<BulkActionResult> {
+    await PermissionService.requirePermission(ctx.user.id, 'bulk_manage_recruitment_leads');
+
+    const preview = await LeadService.previewBulkChangeStatus(
+      { lead_ids: input.lead_ids, new_status: input.new_status },
+      ctx,
+    );
+    if (!preview.all_eligible) {
+      throw new BusinessRuleError(
+        `Bulk status change blocked — ${preview.ineligible.length} of ${input.lead_ids.length} selected leads are not eligible to move to ${input.new_status.replace(/_/g, ' ')}.`,
+      );
+    }
+
+    const outcomes: BulkActionOutcome[] = [];
+    for (const leadId of input.lead_ids) {
+      try {
+        await LeadService.changeStatus(
+          leadId,
+          { new_status: input.new_status, reason: input.reason },
+          ctx,
+        );
+        outcomes.push({ lead_id: leadId, succeeded: true, reason: null });
+      } catch (err) {
+        outcomes.push({
+          lead_id: leadId,
+          succeeded: false,
+          reason: err instanceof Error ? err.message : 'Failed to change status',
+        });
+      }
+    }
+    return summarizeOutcomes(outcomes);
+  },
+
+  // "My Follow-ups" is a personal lead_tasks queue (see Sprint 7.2 plan) —
+  // due_today/overdue/upcoming are computed from due_at + status;
+  // completed_recently looks at completed tasks from the last 14 days.
+  // Viewing another user's queue requires assign_lead (the existing
+  // "can see other people's workload" gate), not a new permission.
+  async getFollowUpQueue(
+    params: {
+      scope: FollowUpQueueScope;
+      assigned_user_id?: string | undefined;
+      site_id?: string | undefined;
+      study_id?: string | undefined;
+      page?: number | undefined;
+      page_size?: number | undefined;
+    },
+    ctx: RequestContext,
+  ): Promise<{ data: FollowUpQueueEntry[]; total: number }> {
+    await PermissionService.requirePermission(ctx.user.id, 'manage_lead_tasks');
+
+    const targetUserId = params.assigned_user_id ?? ctx.user.id;
+    if (targetUserId !== ctx.user.id) {
+      await PermissionService.requirePermission(ctx.user.id, 'assign_lead');
+    }
+
+    const page = params.page && params.page > 0 ? params.page : 1;
+    const pageSize =
+      params.page_size && params.page_size > 0 ? Math.min(params.page_size, 100) : 25;
+
+    const supabase = await createServerSupabaseClient();
+
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+    const startOfTomorrow = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() + 1,
+    ).toISOString();
+
+    let query = supabase
+      .from('lead_tasks')
+      .select(TASK_COLUMNS, { count: 'exact' })
+      .eq('company_id', ctx.company.id)
+      .eq('assigned_user_id', targetUserId);
+
+    if (params.scope === 'due_today') {
+      query = query
+        .in('status', ['open', 'in_progress'])
+        .gte('due_at', startOfToday)
+        .lt('due_at', startOfTomorrow);
+    } else if (params.scope === 'overdue') {
+      query = query.in('status', ['open', 'in_progress']).lt('due_at', startOfToday);
+    } else if (params.scope === 'upcoming') {
+      query = query.in('status', ['open', 'in_progress']).gte('due_at', startOfTomorrow);
+    } else {
+      const cutoff = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString();
+      query = query.eq('status', 'completed').gte('completed_at', cutoff);
+    }
+
+    if (params.site_id) query = query.eq('site_id', params.site_id);
+    if (params.study_id) query = query.eq('study_id', params.study_id);
+
+    query = query
+      .order('due_at', { ascending: true, nullsFirst: false })
+      .range((page - 1) * pageSize, page * pageSize - 1);
+
+    const { data, error, count } = await query;
+    if (error) throw new DatabaseError(error.message);
+    const tasks = (data as LeadTask[]) ?? [];
+
+    const leadIds = Array.from(new Set(tasks.map((t) => t.lead_id)));
+    const leadInfoById = new Map<string, { status: LeadStatus; initials: string | null }>();
+    if (leadIds.length > 0) {
+      const { data: leadRows, error: leadsError } = await supabase
+        .from('leads')
+        .select('id, status, initials')
+        .eq('company_id', ctx.company.id)
+        .in('id', leadIds);
+      if (leadsError) throw new DatabaseError(leadsError.message);
+      for (const row of (leadRows as Array<{
+        id: string;
+        status: LeadStatus;
+        initials: string | null;
+      }>) ?? []) {
+        leadInfoById.set(row.id, { status: row.status, initials: row.initials });
+      }
+    }
+
+    const entries: FollowUpQueueEntry[] = tasks.map((task) => ({
+      ...task,
+      lead_status: leadInfoById.get(task.lead_id)?.status ?? 'new',
+      lead_initials: leadInfoById.get(task.lead_id)?.initials ?? null,
+    }));
+
+    return { data: entries, total: count ?? entries.length };
+  },
+
+  // assign_lead is reused as the "can see workload across users" gate — the
+  // same permission already governs seeing/changing who owns a lead.
+  async getWorkloadSummary(
+    filters: { site_id?: string | undefined; study_id?: string | undefined },
+    ctx: RequestContext,
+  ): Promise<WorkloadSummary> {
+    await PermissionService.requirePermission(ctx.user.id, 'assign_lead');
+
+    const supabase = await createServerSupabaseClient();
+    let leadsQuery = supabase
+      .from('leads')
+      .select('id, assigned_user_id')
+      .eq('company_id', ctx.company.id)
+      .is('archived_at', null);
+    if (filters.site_id) leadsQuery = leadsQuery.eq('site_id', filters.site_id);
+    if (filters.study_id) leadsQuery = leadsQuery.eq('study_id', filters.study_id);
+
+    const { data: leadRows, error: leadsError } = await leadsQuery;
+    if (leadsError) throw new DatabaseError(leadsError.message);
+    const leads = (leadRows as Array<{ id: string; assigned_user_id: string | null }>) ?? [];
+
+    const countByUser = new Map<string, number>();
+    let unassignedCount = 0;
+    for (const lead of leads) {
+      if (lead.assigned_user_id) {
+        countByUser.set(lead.assigned_user_id, (countByUser.get(lead.assigned_user_id) ?? 0) + 1);
+      } else {
+        unassignedCount += 1;
+      }
+    }
+
+    const { data: taskRows, error: tasksError } = await supabase
+      .from('lead_tasks')
+      .select('assigned_user_id, due_at')
+      .eq('company_id', ctx.company.id)
+      .in('status', ['open', 'in_progress']);
+    if (tasksError) throw new DatabaseError(tasksError.message);
+
+    const overdueCountByUser = new Map<string, number>();
+    const now = Date.now();
+    for (const row of (taskRows as Array<{
+      assigned_user_id: string | null;
+      due_at: string | null;
+    }>) ?? []) {
+      if (!row.assigned_user_id || !row.due_at) continue;
+      if (new Date(row.due_at).getTime() < now) {
+        overdueCountByUser.set(
+          row.assigned_user_id,
+          (overdueCountByUser.get(row.assigned_user_id) ?? 0) + 1,
+        );
+      }
+    }
+
+    const entries: WorkloadSummaryEntry[] = Array.from(countByUser.entries()).map(
+      ([assigned_user_id, active_lead_count]) => ({
+        assigned_user_id,
+        active_lead_count,
+        overdue_task_count: overdueCountByUser.get(assigned_user_id) ?? 0,
+      }),
+    );
+
+    return { entries, unassigned_count: unassignedCount };
+  },
+
+  // Mirrors the ActivationReadiness pattern already built for Studies — only
+  // the preconditions convertToSubject actually enforces are blocking=true;
+  // duplicate/do-not-contact/consent are informational warnings, matching
+  // that same precedent's reasoning.
+  async getConversionReadiness(leadId: string, ctx: RequestContext): Promise<ConversionReadiness> {
+    await PermissionService.requirePermission(ctx.user.id, 'view_leads');
+    const lead = await getLeadOrThrow(leadId, ctx);
+
+    const supabase = await createServerSupabaseClient();
+    const canConvertPermission = await PermissionService.hasPermission(ctx.user.id, 'convert_lead');
+
+    const items: ConversionReadinessItem[] = [];
+
+    items.push({
+      key: 'not_previously_converted',
+      label: 'Lead has not already been converted',
+      met: !lead.converted_subject_id,
+      blocking: true,
+      reason: lead.converted_subject_id
+        ? 'This lead has already been converted to a Subject.'
+        : null,
+    });
+    items.push({
+      key: 'site_assigned',
+      label: 'Site assigned',
+      met: Boolean(lead.site_id),
+      blocking: true,
+      reason: lead.site_id
+        ? null
+        : 'This lead must be assigned to a site before it can be converted.',
+    });
+    items.push({
+      key: 'study_assigned',
+      label: 'Study assigned',
+      met: Boolean(lead.study_id),
+      blocking: true,
+      reason: lead.study_id
+        ? null
+        : 'This lead must be matched to a study before it can be converted.',
+    });
+    items.push({
+      key: 'permission_granted',
+      label: 'You have permission to convert leads',
+      met: canConvertPermission,
+      blocking: true,
+      reason: canConvertPermission ? null : 'You do not have permission to convert leads.',
+    });
+
+    let contactInfoComplete = false;
+    let contactInfoReason: string | null = 'This lead has no contact information on file yet.';
+    const { data: contactInfo } = await supabase
+      .from('lead_contact_info')
+      .select('date_of_birth, sex')
+      .eq('lead_id', leadId)
+      .maybeSingle();
+    if (contactInfo) {
+      const info = contactInfo as { date_of_birth: string | null; sex: string | null };
+      const missing = [!info.date_of_birth && 'date of birth', !info.sex && 'sex'].filter(
+        (f): f is string => Boolean(f),
+      );
+      contactInfoComplete = missing.length === 0;
+      contactInfoReason = missing.length > 0 ? `Missing ${missing.join(' and ')} on file.` : null;
+    }
+    items.push({
+      key: 'contact_info_complete',
+      label: 'Contact information complete (date of birth, sex)',
+      met: contactInfoComplete,
+      blocking: true,
+      reason: contactInfoReason,
+    });
+
+    let prescreeningEligible = false;
+    let prescreeningReason: string | null = 'No study matched yet.';
+    if (lead.study_id) {
+      prescreeningReason = 'No prescreening on file for the matched study.';
+      const { data: latestPrescreening } = await supabase
+        .from('lead_prescreenings')
+        .select('computed_outcome, manual_outcome')
+        .eq('lead_id', leadId)
+        .eq('study_id', lead.study_id)
+        .order('completed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (latestPrescreening) {
+        const p = latestPrescreening as {
+          computed_outcome: PrescreeningOutcome;
+          manual_outcome: PrescreeningOutcome | null;
+        };
+        const effective = p.manual_outcome ?? p.computed_outcome;
+        prescreeningEligible = effective !== 'not_eligible';
+        prescreeningReason = prescreeningEligible
+          ? null
+          : 'The most recent prescreening outcome is Not Eligible.';
+      }
+    }
+    items.push({
+      key: 'prescreening_eligible',
+      label: 'Prescreening outcome is not Not Eligible',
+      met: prescreeningEligible,
+      blocking: true,
+      reason: prescreeningReason,
+    });
+
+    const canViewPhi = await PermissionService.hasPermission(ctx.user.id, 'view_lead_phi');
+    let hasActiveDuplicate = false;
+    if (canViewPhi) {
+      const flagged = await LeadDuplicateService.getLeadsWithActiveDuplicateWarnings(ctx);
+      hasActiveDuplicate = flagged.has(leadId);
+    }
+    items.push({
+      key: 'duplicate_review',
+      label: 'No unresolved duplicate matches',
+      met: !hasActiveDuplicate,
+      blocking: false,
+      reason: hasActiveDuplicate
+        ? 'This lead has an unresolved possible duplicate match — review before converting.'
+        : null,
+    });
+
+    items.push({
+      key: 'do_not_contact_clear',
+      label: 'Lead is not marked do-not-contact',
+      met: !lead.do_not_contact,
+      blocking: false,
+      reason: lead.do_not_contact ? 'This lead is marked do-not-contact.' : null,
+    });
+
+    items.push({
+      key: 'consent_to_contact',
+      label: 'Consent to contact is recorded',
+      met: lead.consent_to_contact,
+      blocking: false,
+      reason: lead.consent_to_contact
+        ? null
+        : 'Consent to contact has not been recorded for this lead.',
+    });
+
+    const blockingItems = items.filter((i) => i.blocking && !i.met);
+    const warnings = items.filter((i) => !i.blocking && !i.met);
+
+    return {
+      can_convert: blockingItems.length === 0,
+      items,
+      blocking_items: blockingItems,
+      warnings,
+    };
+  },
+
+  // Column counts for the Kanban Pipeline — one bounded query (status only,
+  // capped) grouped in JS by the shared column mapping, never a per-column
+  // count query (10x) and never the full lead rows (no PHI join at all).
+  async getPipelineCounts(
+    filters: {
+      site_id?: string | undefined;
+      study_id?: string | undefined;
+      assigned_user_id?: string | undefined;
+      priority?: LeadPriority | undefined;
+    },
+    ctx: RequestContext,
+  ): Promise<PipelineCounts> {
+    await PermissionService.requirePermission(ctx.user.id, 'view_leads');
+
+    const supabase = await createServerSupabaseClient();
+    let query = supabase
+      .from('leads')
+      .select('status')
+      .eq('company_id', ctx.company.id)
+      .is('archived_at', null)
+      .limit(10000);
+    if (filters.site_id) query = query.eq('site_id', filters.site_id);
+    if (filters.study_id) query = query.eq('study_id', filters.study_id);
+    if (filters.assigned_user_id) query = query.eq('assigned_user_id', filters.assigned_user_id);
+    if (filters.priority) query = query.eq('priority', filters.priority);
+
+    const { data, error } = await query;
+    if (error) throw new DatabaseError(error.message);
+
+    const countByColumn = new Map<PipelineColumnKey, number>();
+    for (const row of (data as Array<{ status: LeadStatus }>) ?? []) {
+      const column = getPipelineColumnForStatus(row.status);
+      countByColumn.set(column, (countByColumn.get(column) ?? 0) + 1);
+    }
+
+    const columns = PIPELINE_COLUMN_ORDER.map((column) => ({
+      column,
+      count: countByColumn.get(column) ?? 0,
+    }));
+
+    return { columns };
   },
 };

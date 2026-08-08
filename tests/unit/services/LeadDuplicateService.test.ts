@@ -118,6 +118,7 @@ describe('LeadDuplicateService.checkDuplicates', () => {
         study_id: null,
         archived: false,
         match_reasons: ['phone_match'],
+        previously_dismissed: false,
       },
     ]);
   });

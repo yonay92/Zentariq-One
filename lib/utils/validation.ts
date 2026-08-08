@@ -469,15 +469,37 @@ export const updateLeadSchema = z.object({
 
 export type UpdateLeadSchema = z.infer<typeof updateLeadSchema>;
 
+const LEAD_SORT_FIELDS = [
+  'created_at',
+  'last_contacted_at',
+  'next_contact_at',
+  'priority',
+  'status',
+] as const;
+
 export const listLeadsSchema = z.object({
   status: z.enum(LEAD_STATUSES).optional(),
+  statuses: z.array(z.enum(LEAD_STATUSES)).max(20).optional(),
   site_id: z.string().uuid().optional(),
   study_id: z.string().uuid().optional(),
   referral_source_id: z.string().uuid().optional(),
   priority: z.enum(LEAD_PRIORITIES).optional(),
   assigned_user_id: z.string().uuid().optional(),
   include_archived: z.coerce.boolean().optional(),
+  search: z.string().max(200).trim().optional(),
+  has_overdue_tasks: z.coerce.boolean().optional(),
+  has_duplicate_warning: z.coerce.boolean().optional(),
+  next_follow_up_from: z.string().datetime().optional(),
+  next_follow_up_to: z.string().datetime().optional(),
+  created_from: z.string().datetime().optional(),
+  created_to: z.string().datetime().optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  page_size: z.coerce.number().int().min(1).max(100).optional(),
+  sort_by: z.enum(LEAD_SORT_FIELDS).optional(),
+  sort_dir: z.enum(['asc', 'desc']).optional(),
 });
+
+export type ListLeadsSchema = z.infer<typeof listLeadsSchema>;
 
 export const logLeadContactSchema = z.object({
   new_status: z.enum(LEAD_STATUSES),
@@ -560,6 +582,7 @@ export const checkDuplicatesSchema = z
     last_name: z.string().max(200).trim().optional(),
     date_of_birth: z.string().date().optional(),
     postal_code: z.string().max(20).trim().optional(),
+    lead_id: z.string().uuid().optional(),
   })
   .refine(
     (v) =>
@@ -832,3 +855,122 @@ export const createStaffDocumentSchema = z.object({
 export type CreateStaffDocumentSchema = z.infer<typeof createStaffDocumentSchema>;
 
 export type OverridePrescreeningSchema = z.infer<typeof overridePrescreeningSchema>;
+
+// ── Recruitment: Duplicate Dismissal ──────────────────────────────────────────
+
+export const dismissDuplicateSchema = z.object({
+  matched_lead_id: z.string().uuid('Invalid lead ID'),
+  reason: z.string().min(1, 'A reason is required').max(1000).trim(),
+});
+
+export type DismissDuplicateSchema = z.infer<typeof dismissDuplicateSchema>;
+
+// ── Recruitment: Bulk Actions ─────────────────────────────────────────────────
+
+const BULK_LEAD_IDS = z
+  .array(z.string().uuid())
+  .min(1, 'Select at least one lead')
+  .max(200, 'A single bulk action may apply to at most 200 leads');
+
+export const bulkAssignLeadsSchema = z.object({
+  lead_ids: BULK_LEAD_IDS,
+  assigned_user_id: z.string().uuid().nullable(),
+});
+
+export type BulkAssignLeadsSchema = z.infer<typeof bulkAssignLeadsSchema>;
+
+export const bulkUpdateLeadPrioritySchema = z.object({
+  lead_ids: BULK_LEAD_IDS,
+  priority: z.enum(LEAD_PRIORITIES),
+});
+
+export type BulkUpdateLeadPrioritySchema = z.infer<typeof bulkUpdateLeadPrioritySchema>;
+
+export const bulkArchiveLeadsSchema = z.object({
+  lead_ids: BULK_LEAD_IDS,
+  reason: z.string().max(1000).trim().optional(),
+});
+
+export type BulkArchiveLeadsSchema = z.infer<typeof bulkArchiveLeadsSchema>;
+
+export const bulkCreateLeadTaskSchema = z.object({
+  lead_ids: BULK_LEAD_IDS,
+  title: z.string().min(1, 'Title is required').max(300).trim(),
+  description: z.string().max(2000).trim().optional(),
+  priority: z.enum(LEAD_PRIORITIES).optional(),
+  assigned_user_id: z.string().uuid().optional(),
+  due_at: z.string().datetime().optional(),
+  override_reason: z.string().max(1000).trim().optional(),
+});
+
+export type BulkCreateLeadTaskSchema = z.infer<typeof bulkCreateLeadTaskSchema>;
+
+export const bulkChangeLeadStatusSchema = z.object({
+  lead_ids: BULK_LEAD_IDS,
+  new_status: z.enum(LEAD_STATUSES),
+  reason: z.string().max(1000).trim().optional(),
+});
+
+export type BulkChangeLeadStatusSchema = z.infer<typeof bulkChangeLeadStatusSchema>;
+
+// ── Recruitment: Follow-up Queues ─────────────────────────────────────────────
+
+export const followUpQueueSchema = z.object({
+  scope: z.enum(['due_today', 'overdue', 'upcoming', 'completed_recently']),
+  assigned_user_id: z.string().uuid().optional(),
+  site_id: z.string().uuid().optional(),
+  study_id: z.string().uuid().optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  page_size: z.coerce.number().int().min(1).max(100).optional(),
+});
+
+export type FollowUpQueueSchema = z.infer<typeof followUpQueueSchema>;
+
+// ── Recruitment: Workload ─────────────────────────────────────────────────────
+
+export const workloadSummarySchema = z.object({
+  site_id: z.string().uuid().optional(),
+  study_id: z.string().uuid().optional(),
+});
+
+export type WorkloadSummarySchema = z.infer<typeof workloadSummarySchema>;
+
+// ── Recruitment: Dashboard (extended) ─────────────────────────────────────────
+
+export const recruitmentDashboardFiltersSchema = z.object({
+  site_id: z.string().uuid().optional(),
+  study_id: z.string().uuid().optional(),
+  assigned_user_id: z.string().uuid().optional(),
+  date_from: z.string().date().optional(),
+  date_to: z.string().date().optional(),
+});
+
+export type RecruitmentDashboardFiltersSchema = z.infer<typeof recruitmentDashboardFiltersSchema>;
+
+// ── Recruitment: Pipeline ─────────────────────────────────────────────────────
+
+const PIPELINE_COLUMNS = [
+  'new',
+  'contact_attempted',
+  'contacted',
+  'interested',
+  'prescreen',
+  'qualified',
+  'screening_scheduled',
+  'screened',
+  'converted',
+  'closed',
+] as const;
+
+export const pipelineCountsSchema = z.object({
+  site_id: z.string().uuid().optional(),
+  study_id: z.string().uuid().optional(),
+  assigned_user_id: z.string().uuid().optional(),
+  priority: z.enum(LEAD_PRIORITIES).optional(),
+});
+
+export type PipelineCountsSchema = z.infer<typeof pipelineCountsSchema>;
+
+export const pipelineColumnSchema = z.object({ column: z.enum(PIPELINE_COLUMNS) });
+
+export type PipelineColumnSchema = z.infer<typeof pipelineColumnSchema>;
