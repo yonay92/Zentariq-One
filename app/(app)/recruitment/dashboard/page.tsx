@@ -9,6 +9,8 @@ import { AlertBanner } from '@/components/ui/AlertBanner';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { RecruitmentViewTabs } from '@/components/recruitment/RecruitmentViewTabs';
+import { MyFollowUpsPanel } from '@/components/recruitment/MyFollowUpsPanel';
+import { TeamWorkloadPanel } from '@/components/recruitment/TeamWorkloadPanel';
 import { useRecruitmentFilters } from '@/hooks/useRecruitmentFilters';
 import type { RecruitmentDashboard, LeadStatus } from '@/types/recruitment';
 import type { Study } from '@/types/studies';
@@ -334,6 +336,11 @@ function RecruitmentDashboardContent() {
                 ))}
               </ul>
             )}
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <MyFollowUpsPanel siteId={get('site_id')} studyId={get('study_id')} />
+            <TeamWorkloadPanel siteId={get('site_id')} studyId={get('study_id')} users={users} />
           </div>
         </div>
       )}
