@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/Badge';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { LeadContactInfoSection } from '@/components/recruitment/LeadContactInfoSection';
+import { LeadDuplicatesSection } from '@/components/recruitment/LeadDuplicatesSection';
 import { LeadActionsPanel } from '@/components/recruitment/LeadActionsPanel';
 import { LeadPrescreeningSection } from '@/components/recruitment/LeadPrescreeningSection';
 import { LeadNotesSection } from '@/components/recruitment/LeadNotesSection';
@@ -108,6 +109,7 @@ export default function LeadProfilePage({ params }: { params: Promise<{ id: stri
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="space-y-4">
           <LeadContactInfoSection leadId={lead.id} onSaved={() => void fetchLead()} />
+          <LeadDuplicatesSection leadId={lead.id} />
           <LeadActionsPanel lead={lead} onChanged={() => void fetchLead()} />
         </div>
         <div className="space-y-4">

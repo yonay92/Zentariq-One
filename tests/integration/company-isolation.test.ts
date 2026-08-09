@@ -66,6 +66,7 @@ function makeTrackingClient(data: unknown = [], error: unknown = null) {
     or: vi.fn().mockReturnThis(),
     order: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
+    range: vi.fn().mockReturnThis(),
     gte: vi.fn().mockReturnThis(),
     lte: vi.fn().mockReturnThis(),
     is: vi.fn().mockReturnThis(),
@@ -441,6 +442,10 @@ describe('LeadService — company isolation', () => {
 
   it('list() scopes the pipeline query to company_id from context', async () => {
     vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    // Skips the PHI-gated duplicate-warning computation, which would
+    // otherwise call the real hasPermission -> supabase.rpc (not present on
+    // this tracking mock) — not what this test is checking.
+    vi.spyOn(PermissionService, 'hasPermission').mockResolvedValue(false);
     const { client, eqCalls } = makeTrackingClient([]);
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 

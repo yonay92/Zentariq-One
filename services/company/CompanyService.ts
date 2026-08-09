@@ -178,6 +178,7 @@ export const CompanyService = {
       'reopen_visit',
       'override_regulatory_status',
       'override_do_not_contact',
+      'reopen_recruitment_tasks',
     ]);
     const adminPerms = Array.from(permMap.entries())
       .filter(([key]) => !ADMIN_EXCLUDED_PERMISSIONS.has(key))
@@ -218,6 +219,8 @@ export const CompanyService = {
       'create_lead_note',
       'log_lead_call',
       'manage_lead_tasks',
+      'view_recruitment_dashboard',
+      'dismiss_recruitment_duplicates',
       'view_staff_credentials',
     ]
       .map((k) => permMap.get(k))

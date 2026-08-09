@@ -283,12 +283,18 @@ test.describe.serial('Recruitment & Patient Management', () => {
       });
       expect(archiveRes.ok()).toBe(true);
 
+      // Sprint 7.2: LeadService.list() (and therefore GET /api/leads) returns
+      // a paginated { data: LeadListItem[], total, page, page_size } object,
+      // not a bare array — the response is now nested one level deeper.
       const listRes = await request.get('/api/leads');
-      const activeLeads = ((await listRes.json()) as { data: Array<{ id: string }> }).data;
+      const activeLeads = ((await listRes.json()) as { data: { data: Array<{ id: string }> } }).data
+        .data;
       expect(activeLeads.some((l) => l.id === statusLeadId)).toBe(false);
 
       const includeArchivedRes = await request.get('/api/leads?include_archived=true');
-      const allLeads = ((await includeArchivedRes.json()) as { data: Array<{ id: string }> }).data;
+      const allLeads = (
+        (await includeArchivedRes.json()) as { data: { data: Array<{ id: string }> } }
+      ).data.data;
       expect(allLeads.some((l) => l.id === statusLeadId)).toBe(true);
 
       await page.goto(`/recruitment/${statusLeadId}`);

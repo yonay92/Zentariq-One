@@ -7,11 +7,11 @@ import { Select } from '@/components/ui/Select';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { usePermissions } from '@/hooks/usePermissions';
+import { DUPLICATE_MATCH_REASON_LABEL } from '@/components/recruitment/duplicateMatchReasonLabel';
 import type {
   LeadPreferredContactMethod,
   LeadContactInfo as ContactInfo,
   DuplicateMatch,
-  DuplicateMatchReason,
 } from '@/types/recruitment';
 
 const CONTACT_METHOD_OPTIONS: Array<{ value: LeadPreferredContactMethod; label: string }> = [
@@ -19,13 +19,6 @@ const CONTACT_METHOD_OPTIONS: Array<{ value: LeadPreferredContactMethod; label: 
   { value: 'email', label: 'Email' },
   { value: 'sms', label: 'SMS' },
 ];
-
-const DUPLICATE_REASON_LABEL: Record<DuplicateMatchReason, string> = {
-  phone_match: 'same phone number',
-  email_match: 'same email address',
-  name_dob_match: 'same name and date of birth',
-  name_postal_code_match: 'same name and postal code',
-};
 
 type FormState = {
   first_name: string;
@@ -312,7 +305,7 @@ export function LeadContactInfoSection({
               <li key={m.lead_id}>
                 {m.initials ?? 'Lead'} — {m.status.replace(/_/g, ' ')}
                 {m.archived ? ' (archived)' : ''} —{' '}
-                {m.match_reasons.map((r) => DUPLICATE_REASON_LABEL[r]).join(', ')}
+                {m.match_reasons.map((r) => DUPLICATE_MATCH_REASON_LABEL[r]).join(', ')}
               </li>
             ))}
           </ul>
