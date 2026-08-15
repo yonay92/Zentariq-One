@@ -825,6 +825,139 @@ describe('SubjectService.completeVisit', () => {
       expect.objectContaining({ action: 'visit.completed', record_id: VISIT_ID }),
     );
   });
+
+  describe('Out of Window (BUSINESS_RULES_04_Visits.md)', () => {
+    const WINDOW_START = '2026-02-10';
+    const WINDOW_END = '2026-02-14';
+
+    function makeWindowedVisit() {
+      const item = {
+        id: 'item-week4',
+        template_id: 'template-uuid',
+        visit_name: 'Week 4',
+        visit_order: 1,
+        is_required: true,
+        is_baseline: false,
+      };
+      const visit = {
+        id: VISIT_ID,
+        status: 'in_progress',
+        visit_name: 'Week 4',
+        visit_template_item_id: item.id,
+        window_start: WINDOW_START,
+        window_end: WINDOW_END,
+      };
+      return { item, visit };
+    }
+
+    function mockClientFor(scheduledDate: string) {
+      const { item, visit } = makeWindowedVisit();
+      const finalStatus =
+        scheduledDate < WINDOW_START || scheduledDate > WINDOW_END ? 'out_of_window' : 'completed';
+      const completedVisit = { ...visit, status: finalStatus, scheduled_date: scheduledDate };
+
+      const client = makeSupabaseClient(
+        { data: makeSubjectRow() }, // getById
+        { data: visit }, // visits select (target visit)
+        { data: { id: 'template-uuid' } }, // visit_templates lookup
+        { data: [item] }, // visit_template_items (no predecessors)
+        { data: [visit] }, // visits (all)
+        { data: completedVisit }, // visits update
+        { data: null }, // visit_history insert
+        { data: null }, // calendar_events select (existing check)
+        { data: null }, // calendar_events insert (self-heal — none existed)
+        { data: null }, // subject_timeline insert
+      );
+      vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+      return completedVisit;
+    }
+
+    beforeEach(() => {
+      vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    });
+
+    it('completes normally when the date is inside the window', async () => {
+      mockClientFor('2026-02-12');
+
+      const result = await SubjectService.completeVisit(
+        SUBJECT_ID,
+        VISIT_ID,
+        { scheduled_date: '2026-02-12' },
+        makeCtx(),
+      );
+
+      expect(result.status).toBe('completed');
+      expect(AuditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'visit.completed' }),
+      );
+      expect(NotificationService.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('treats a date exactly on the window boundary as in-window (inclusive)', async () => {
+      mockClientFor(WINDOW_END);
+
+      const result = await SubjectService.completeVisit(
+        SUBJECT_ID,
+        VISIT_ID,
+        { scheduled_date: WINDOW_END },
+        makeCtx(),
+      );
+
+      expect(result.status).toBe('completed');
+      expect(AuditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'visit.completed' }),
+      );
+      expect(NotificationService.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('marks out_of_window and notifies the CRC when the date is before the window', async () => {
+      const beforeDate = '2026-02-05';
+      mockClientFor(beforeDate);
+
+      const result = await SubjectService.completeVisit(
+        SUBJECT_ID,
+        VISIT_ID,
+        { scheduled_date: beforeDate },
+        makeCtx(),
+      );
+
+      expect(result.status).toBe('out_of_window');
+      expect(AuditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'visit.out_of_window', record_id: VISIT_ID }),
+      );
+      expect(NotificationService.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'visit_out_of_window',
+          recipientRole: 'crc',
+          relatedRecordId: VISIT_ID,
+        }),
+      );
+    });
+
+    it('marks out_of_window and notifies the CRC when the date is after the window', async () => {
+      const afterDate = '2026-02-20';
+      mockClientFor(afterDate);
+
+      const result = await SubjectService.completeVisit(
+        SUBJECT_ID,
+        VISIT_ID,
+        { scheduled_date: afterDate },
+        makeCtx(),
+      );
+
+      expect(result.status).toBe('out_of_window');
+      expect(AuditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'visit.out_of_window', record_id: VISIT_ID }),
+      );
+      expect(NotificationService.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'visit_out_of_window',
+          recipientRole: 'crc',
+          relatedRecordId: VISIT_ID,
+        }),
+      );
+    });
+  });
 });
 
 describe('SubjectService.updateStatus', () => {
