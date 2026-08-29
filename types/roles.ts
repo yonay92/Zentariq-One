@@ -54,6 +54,8 @@ export type PermissionKey =
   | 'upload_regulatory_document'
   | 'edit_regulatory_document'
   | 'archive_regulatory_document'
+  | 'view_documents'
+  | 'upload_documents'
   | 'edit_business_rules'
   | 'view_all_sites'
   | 'manage_users'
