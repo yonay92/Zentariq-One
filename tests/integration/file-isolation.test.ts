@@ -57,6 +57,7 @@ function queryStub(data: unknown, error: unknown = null) {
     select: vi.fn().mockReturnThis(),
     eq: vi.fn().mockReturnThis(),
     not: vi.fn().mockReturnThis(),
+    in: vi.fn().mockReturnThis(),
     insert: vi.fn().mockReturnThis(),
     delete: vi.fn().mockReturnThis(),
     maybeSingle: vi.fn().mockResolvedValue({ data, error }),
@@ -65,7 +66,7 @@ function queryStub(data: unknown, error: unknown = null) {
     catch: resolved.catch.bind(resolved),
     finally: resolved.finally.bind(resolved),
   };
-  for (const key of ['select', 'not', 'insert', 'delete']) {
+  for (const key of ['select', 'not', 'in', 'insert', 'delete']) {
     (stub[key] as ReturnType<typeof vi.fn>).mockReturnValue(stub);
   }
   return stub;
@@ -155,6 +156,42 @@ describe('FileService — company isolation', () => {
 
     const result = await FileService.getMetadata(FILE_ID, makeCtx(COMPANY_A));
     expect(result.company_id).toBe(COMPANY_A);
+  });
+
+  it("FileService.list() scopes its files query to the caller's own company_id (never a client-supplied one)", async () => {
+    // Tracks every .eq() call, same convention as company-isolation.test.ts's
+    // makeTrackingClient — proves the browse query is scoped server-side to
+    // the authenticated session's own company, not any value a client could
+    // influence.
+    const eqCalls: Array<[string, unknown]> = [];
+    const resolved = Promise.resolve({ data: [makeFile(COMPANY_A)], error: null });
+    const stub: Record<string, unknown> = {
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockImplementation((col: string, val: unknown) => {
+        eqCalls.push([col, val]);
+        return stub;
+      }),
+      in: vi.fn().mockReturnThis(),
+      order: vi.fn().mockReturnThis(),
+      gte: vi.fn().mockReturnThis(),
+      lte: vi.fn().mockReturnThis(),
+      then: resolved.then.bind(resolved),
+      catch: resolved.catch.bind(resolved),
+      finally: resolved.finally.bind(resolved),
+    };
+    for (const key of ['select', 'in', 'order', 'gte', 'lte']) {
+      (stub[key] as ReturnType<typeof vi.fn>).mockReturnValue(stub);
+    }
+    const linksStub = queryStub([]);
+    const from = vi.fn().mockReturnValueOnce(stub).mockReturnValueOnce(linksStub);
+
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce({ from } as never);
+    vi.spyOn(PermissionService, 'hasPermission').mockResolvedValue(true);
+
+    await FileService.list({}, makeCtx(COMPANY_A));
+
+    expect(eqCalls).toContainEqual(['company_id', COMPANY_A]);
+    expect(eqCalls.every(([col, val]) => col !== 'company_id' || val === COMPANY_A)).toBe(true);
   });
 });
 

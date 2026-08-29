@@ -28,5 +28,14 @@ export type LinkFileToRecordInput = {
   file_id: string;
   module: string;
   record_id: string;
-  site_id?: string | null;
+  site_id?: string | null | undefined;
+};
+
+export type FileWithLinks = FileRecord & { links: FileLink[] };
+
+export type ListFilesFilters = {
+  module?: string | undefined;
+  uploaded_by?: string | undefined;
+  uploaded_after?: string | undefined;
+  uploaded_before?: string | undefined;
 };

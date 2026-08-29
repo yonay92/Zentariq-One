@@ -4,7 +4,13 @@ import { createAdminSupabaseClient } from '@/lib/supabase/admin';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { NotFoundError, DatabaseError, PermissionDeniedError } from '@/lib/api/errors';
-import type { FileRecord, FileLink, LinkFileToRecordInput } from '@/types/files';
+import type {
+  FileRecord,
+  FileLink,
+  FileWithLinks,
+  LinkFileToRecordInput,
+  ListFilesFilters,
+} from '@/types/files';
 import type { RequestContext } from '@/types/api';
 
 const BUCKET = 'documents';
@@ -132,6 +138,103 @@ export const FileService = {
     await assertSiteAuthorized(ctx.user.id, fileId);
 
     return data as FileRecord;
+  },
+
+  /** getMetadata plus every file_links row for that file — used by the Document Center preview panel. */
+  async getWithLinks(fileId: string, ctx: RequestContext): Promise<FileWithLinks> {
+    const file = await this.getMetadata(fileId, ctx);
+
+    const supabase = await createServerSupabaseClient();
+    const { data } = await supabase
+      .from('file_links')
+      .select(LINK_COLUMNS)
+      .eq('company_id', ctx.company.id)
+      .eq('file_id', fileId);
+
+    return { ...file, links: (data as FileLink[]) ?? [] };
+  },
+
+  /**
+   * Company-scoped file browsing for the Document Center. Every returned row
+   * has already passed the same site-authorization check getMetadata applies
+   * to a single file (skipped in bulk for callers holding view_all_sites).
+   * module/uploaded_by/date filters are optional and combine with AND.
+   */
+  async list(filters: ListFilesFilters, ctx: RequestContext): Promise<FileWithLinks[]> {
+    await PermissionService.requirePermission(ctx.user.id, 'view_documents');
+
+    const supabase = await createServerSupabaseClient();
+
+    let matchingFileIds: string[] | null = null;
+    if (filters.module) {
+      const { data: moduleLinks } = await supabase
+        .from('file_links')
+        .select('file_id')
+        .eq('company_id', ctx.company.id)
+        .eq('module', filters.module);
+      matchingFileIds = Array.from(
+        new Set(((moduleLinks as Array<{ file_id: string }> | null) ?? []).map((r) => r.file_id)),
+      );
+      if (matchingFileIds.length === 0) return [];
+    }
+
+    let query = supabase
+      .from('files')
+      .select(FILE_COLUMNS)
+      .eq('company_id', ctx.company.id)
+      .order('uploaded_at', { ascending: false });
+
+    if (matchingFileIds) query = query.in('id', matchingFileIds);
+    if (filters.uploaded_by) query = query.eq('uploaded_by', filters.uploaded_by);
+    if (filters.uploaded_after) query = query.gte('uploaded_at', filters.uploaded_after);
+    if (filters.uploaded_before) query = query.lte('uploaded_at', filters.uploaded_before);
+
+    const { data } = await query;
+    const files = (data as FileRecord[] | null) ?? [];
+    if (files.length === 0) return [];
+
+    const { data: linkRows } = await supabase
+      .from('file_links')
+      .select(LINK_COLUMNS)
+      .eq('company_id', ctx.company.id)
+      .in(
+        'file_id',
+        files.map((f) => f.id),
+      );
+
+    const linksByFile = new Map<string, FileLink[]>();
+    for (const link of (linkRows as FileLink[] | null) ?? []) {
+      const existing = linksByFile.get(link.file_id) ?? [];
+      existing.push(link);
+      linksByFile.set(link.file_id, existing);
+    }
+
+    const hasAllSites = await PermissionService.hasPermission(ctx.user.id, 'view_all_sites');
+
+    const results: FileWithLinks[] = [];
+    for (const file of files) {
+      const links = linksByFile.get(file.id) ?? [];
+
+      if (!hasAllSites) {
+        const siteIds = Array.from(
+          new Set(links.map((l) => l.site_id).filter((s): s is string => Boolean(s))),
+        );
+        if (siteIds.length > 0) {
+          let authorized = false;
+          for (const siteId of siteIds) {
+            if (await PermissionService.canAccessSite(ctx.user.id, siteId)) {
+              authorized = true;
+              break;
+            }
+          }
+          if (!authorized) continue;
+        }
+      }
+
+      results.push({ ...file, links });
+    }
+
+    return results;
   },
 
   /**

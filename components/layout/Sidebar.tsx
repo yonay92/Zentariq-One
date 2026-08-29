@@ -131,7 +131,7 @@ const NAV_ITEMS: NavItem[] = [
         />
       </svg>
     ),
-    permission: 'upload_regulatory_document',
+    permission: 'view_documents',
   },
   {
     label: 'Tasks',

@@ -82,6 +82,10 @@ function queryStub(data: unknown, error: unknown = null) {
     select: vi.fn().mockReturnThis(),
     eq: vi.fn().mockReturnThis(),
     not: vi.fn().mockReturnThis(),
+    in: vi.fn().mockReturnThis(),
+    order: vi.fn().mockReturnThis(),
+    gte: vi.fn().mockReturnThis(),
+    lte: vi.fn().mockReturnThis(),
     insert: vi.fn().mockReturnThis(),
     delete: vi.fn().mockReturnThis(),
     maybeSingle: vi.fn().mockResolvedValue({ data, error }),
@@ -90,7 +94,7 @@ function queryStub(data: unknown, error: unknown = null) {
     catch: resolved.catch.bind(resolved),
     finally: resolved.finally.bind(resolved),
   };
-  for (const key of ['select', 'eq', 'not', 'insert', 'delete']) {
+  for (const key of ['select', 'eq', 'not', 'in', 'order', 'gte', 'lte', 'insert', 'delete']) {
     (stub[key] as ReturnType<typeof vi.fn>).mockReturnValue(stub);
   }
   return stub;
@@ -405,5 +409,125 @@ describe('FileService.listLinksForRecord', () => {
     const result = await FileService.listLinksForRecord('subjects', 'record-uuid', makeCtx());
     expect(result).toHaveLength(1);
     expect(result[0]?.company_id).toBe(COMPANY_ID);
+  });
+});
+
+// ── getWithLinks ─────────────────────────────────────────────────────────
+
+describe('FileService.getWithLinks', () => {
+  it('throws NotFoundError for a file belonging to a different company', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: null, error: { message: 'no rows' } }]),
+    );
+
+    await expect(FileService.getWithLinks(FILE_ID, makeCtx())).rejects.toThrow(NotFoundError);
+  });
+
+  it('returns the file with its links attached', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    // getWithLinks calls createServerSupabaseClient() twice: once inside
+    // getMetadata (files lookup) and once for its own file_links lookup.
+    vi.mocked(createServerSupabaseClient)
+      .mockResolvedValueOnce(makeSupabaseClient([{ data: makeFile() }]))
+      .mockResolvedValueOnce(makeSupabaseClient([{ data: [makeLink()] }]));
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce(makeAdminClient([]));
+
+    const result = await FileService.getWithLinks(FILE_ID, makeCtx());
+    expect(result.id).toBe(FILE_ID);
+    expect(result.links).toHaveLength(1);
+    expect(result.links[0]?.module).toBe('subjects');
+  });
+
+  it('returns an empty links array for a file with no linked records', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient)
+      .mockResolvedValueOnce(makeSupabaseClient([{ data: makeFile() }]))
+      .mockResolvedValueOnce(makeSupabaseClient([{ data: [] }]));
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce(makeAdminClient([]));
+
+    const result = await FileService.getWithLinks(FILE_ID, makeCtx());
+    expect(result.links).toEqual([]);
+  });
+});
+
+// ── list — browsing, filters, and per-row site authorization ──────────────
+
+describe('FileService.list', () => {
+  it('throws PermissionDeniedError when the caller lacks view_documents', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('view_documents'),
+    );
+
+    await expect(FileService.list({}, makeCtx())).rejects.toThrow(PermissionDeniedError);
+  });
+
+  it("returns every company file scoped to the caller's company when the caller holds view_all_sites", async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: [makeFile()] }, { data: [] }]),
+    );
+    vi.spyOn(PermissionService, 'hasPermission').mockResolvedValue(true);
+
+    const result = await FileService.list({}, makeCtx());
+    expect(result).toHaveLength(1);
+    expect(result[0]?.company_id).toBe(COMPANY_ID);
+    expect(result[0]?.links).toEqual([]);
+  });
+
+  it('excludes a file whose only linked site the caller cannot access', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: [makeFile()] }, { data: [makeLink({ site_id: SITE_ID })] }]),
+    );
+    vi.spyOn(PermissionService, 'hasPermission').mockResolvedValue(false); // no view_all_sites
+    vi.spyOn(PermissionService, 'canAccessSite').mockResolvedValue(false);
+
+    const result = await FileService.list({}, makeCtx());
+    expect(result).toHaveLength(0);
+  });
+
+  it('includes a file whose linked site the caller can access', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: [makeFile()] }, { data: [makeLink({ site_id: SITE_ID })] }]),
+    );
+    vi.spyOn(PermissionService, 'hasPermission').mockResolvedValue(false);
+    vi.spyOn(PermissionService, 'canAccessSite').mockResolvedValue(true);
+
+    const result = await FileService.list({}, makeCtx());
+    expect(result).toHaveLength(1);
+  });
+
+  it('returns an empty array immediately when the module filter matches no links (no unnecessary files query)', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(makeSupabaseClient([{ data: [] }]));
+
+    const result = await FileService.list({ module: 'subjects' }, makeCtx());
+    expect(result).toEqual([]);
+  });
+
+  it('returns files matching a module filter', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([
+        { data: [{ file_id: FILE_ID }] }, // module-filter file_links lookup
+        { data: [makeFile()] }, // files query
+        { data: [makeLink()] }, // links-for-found-files lookup
+      ]),
+    );
+    vi.spyOn(PermissionService, 'hasPermission').mockResolvedValue(true);
+
+    const result = await FileService.list({ module: 'subjects' }, makeCtx());
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id).toBe(FILE_ID);
+  });
+
+  it('returns an empty array when no files exist for the company', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(makeSupabaseClient([{ data: [] }]));
+
+    const result = await FileService.list({}, makeCtx());
+    expect(result).toEqual([]);
   });
 });
