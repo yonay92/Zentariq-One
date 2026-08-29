@@ -974,3 +974,13 @@ export type PipelineCountsSchema = z.infer<typeof pipelineCountsSchema>;
 export const pipelineColumnSchema = z.object({ column: z.enum(PIPELINE_COLUMNS) });
 
 export type PipelineColumnSchema = z.infer<typeof pipelineColumnSchema>;
+
+// ── Document Center ───────────────────────────────────────────────────────────
+
+export const linkFileSchema = z.object({
+  module: z.string().min(1, 'Module is required').max(50),
+  record_id: z.string().uuid('Invalid record ID'),
+  site_id: z.string().uuid('Invalid site ID').optional(),
+});
+
+export type LinkFileSchema = z.infer<typeof linkFileSchema>;
