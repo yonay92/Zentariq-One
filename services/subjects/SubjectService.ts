@@ -689,9 +689,19 @@ export const SubjectService = {
       throw new BusinessRuleError(lockStatus.reason);
     }
 
+    // BUSINESS_RULES_04_Visits.md "Out of Window": a completion date outside the
+    // visit's window is marked out_of_window instead of completed — the visit
+    // occurred, just late. Chart-priority escalation is deferred (Charts ship in
+    // Sprint 5); the status transition, CRC notification, and audit trail are not.
+    const isOutOfWindow =
+      !!visit.window_start &&
+      !!visit.window_end &&
+      (input.scheduled_date < visit.window_start || input.scheduled_date > visit.window_end);
+    const finalStatus: VisitStatus = isOutOfWindow ? 'out_of_window' : 'completed';
+
     const { data: updated, error: updateError } = await supabase
       .from('visits')
-      .update({ status: 'completed', scheduled_date: input.scheduled_date })
+      .update({ status: finalStatus, scheduled_date: input.scheduled_date })
       .eq('id', visitId)
       .eq('company_id', ctx.company.id)
       .select(VISIT_COLUMNS)
@@ -705,10 +715,15 @@ export const SubjectService = {
       company_id: ctx.company.id,
       visit_id: visitId,
       old_status: visit.status,
-      new_status: 'completed',
+      new_status: finalStatus,
       changed_by: ctx.user.id,
+      reason: isOutOfWindow
+        ? `Completed outside visit window (${visit.window_start} – ${visit.window_end})`
+        : null,
     });
 
+    // calendar_events.status has no out_of_window state — the visit still occurred,
+    // so it renders as completed on the Calendar either way (matches classifyVisit).
     await VisitService.upsertCalendarEventForVisit(updated as Visit, ctx, { status: 'completed' });
 
     await this.addTimelineEvent(
@@ -716,7 +731,9 @@ export const SubjectService = {
       ctx.company.id,
       'visit_completed',
       new Date().toISOString(),
-      `${visit.visit_name} visit completed on ${input.scheduled_date}`,
+      isOutOfWindow
+        ? `${visit.visit_name} visit completed out of window on ${input.scheduled_date} (window: ${visit.window_start} – ${visit.window_end})`
+        : `${visit.visit_name} visit completed on ${input.scheduled_date}`,
       ctx.user.id,
       'visits',
       visitId,
@@ -726,12 +743,25 @@ export const SubjectService = {
       company_id: ctx.company.id,
       site_id: subject.site_id,
       user_id: ctx.user.id,
-      action: 'visit.completed',
+      action: isOutOfWindow ? 'visit.out_of_window' : 'visit.completed',
       module: 'subjects',
       record_type: 'visits',
       record_id: visitId,
-      new_value: { status: 'completed', scheduled_date: input.scheduled_date },
+      new_value: { status: finalStatus, scheduled_date: input.scheduled_date },
     });
+
+    if (isOutOfWindow) {
+      await NotificationService.dispatch({
+        type: 'visit_out_of_window',
+        companyId: ctx.company.id,
+        siteId: subject.site_id,
+        recipientRole: 'crc',
+        relatedModule: 'subjects',
+        relatedRecordId: visitId,
+        relatedRecordType: 'visits',
+        context: { subject_number: subject.subject_number },
+      });
+    }
 
     return updated as Visit;
   },

@@ -27,6 +27,12 @@ export const E2E_USERS = {
   admin: { email: 'e2e-admin@zentariq-e2e.test', roleKey: 'e2e_admin' },
   phi: { email: 'e2e-phi@zentariq-e2e.test', roleKey: 'e2e_phi' },
   nophi: { email: 'e2e-nophi@zentariq-e2e.test', roleKey: 'e2e_nophi' },
+  // e2e_admin deliberately excludes reopen_visit (ADMIN_EXCLUDED_PERMISSIONS
+  // below, mirroring the real bootstrapped Administrator) — none of the other
+  // seeded personas hold it either, so the Visit Calendar e2e suite's Reopen
+  // coverage needs a persona that does. Smallest possible addition: base
+  // access + reopen_visit only, nothing else.
+  reopener: { email: 'e2e-reopener@zentariq-e2e.test', roleKey: 'e2e_reopener' },
 } as const;
 
 export type E2EPersona = keyof typeof E2E_USERS;
@@ -224,6 +230,13 @@ export async function seedIdentityFixtures(): Promise<E2EIdentityFixtures> {
     'edit_lead_phi',
   ];
   const nophiPerms = [...BASE_ACCESS_PERMISSIONS];
+  // manage_visits is required alongside reopen_visit: it's the base RLS gate
+  // on any visits UPDATE (migration 010_visit_calendar.sql), separate from
+  // reopen_visit's app-level "dangerous operation" override check
+  // (VisitService.reopenVisit -> PermissionService.guardDangerousOperation).
+  // Without it the reopen write itself is silently blocked by RLS (0 rows
+  // affected -> "Cannot coerce the result to a single JSON object").
+  const reopenerPerms = [...BASE_ACCESS_PERMISSIONS, 'manage_visits', 'reopen_visit'];
 
   const adminRoleId = await findOrCreateRole(
     supabase,
@@ -249,6 +262,14 @@ export async function seedIdentityFixtures(): Promise<E2EIdentityFixtures> {
     nophiPerms,
     permissionMap,
   );
+  const reopenerRoleId = await findOrCreateRole(
+    supabase,
+    companyId,
+    E2E_USERS.reopener.roleKey,
+    'E2E Reopener',
+    reopenerPerms,
+    permissionMap,
+  );
 
   const adminUserId = await findOrCreateUser(
     supabase,
@@ -271,6 +292,13 @@ export async function seedIdentityFixtures(): Promise<E2EIdentityFixtures> {
     E2E_USERS.nophi.email,
     'E2E No-PHI User',
   );
+  const reopenerUserId = await findOrCreateUser(
+    supabase,
+    companyId,
+    reopenerRoleId,
+    E2E_USERS.reopener.email,
+    'E2E Reopener',
+  );
 
   return {
     companyId,
@@ -280,6 +308,39 @@ export async function seedIdentityFixtures(): Promise<E2EIdentityFixtures> {
       admin: { userId: adminUserId, email: E2E_USERS.admin.email, password: E2E_PASSWORD },
       phi: { userId: phiUserId, email: E2E_USERS.phi.email, password: E2E_PASSWORD },
       nophi: { userId: nophiUserId, email: E2E_USERS.nophi.email, password: E2E_PASSWORD },
+      reopener: {
+        userId: reopenerUserId,
+        email: E2E_USERS.reopener.email,
+        password: E2E_PASSWORD,
+      },
     },
   };
+}
+
+/**
+ * Assigns a user as an active CRC on a study by inserting directly into
+ * study_staff. There is currently no API/UI path to manage study staff
+ * assignments in the app — StudyService.listCrcOptions (which backs the
+ * Calendar's CRC filter) only ever reads this table — so, same rationale as
+ * the identity fixtures above, a raw write is the only option for this
+ * fixture data. Upserts on the table's (study_id, user_id, staff_role)
+ * unique constraint, though callers only need this once per (fresh) study.
+ */
+export async function assignCrcStaff(
+  companyId: string,
+  studyId: string,
+  userId: string,
+): Promise<void> {
+  const supabase = createAdminSupabaseClient();
+  const { error } = await supabase.from('study_staff').upsert(
+    {
+      company_id: companyId,
+      study_id: studyId,
+      user_id: userId,
+      staff_role: 'crc',
+      active: true,
+    },
+    { onConflict: 'study_id,user_id,staff_role', ignoreDuplicates: true },
+  );
+  if (error) throw new Error(`Failed to assign CRC staff: ${error.message}`);
 }
