@@ -3,12 +3,19 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { createAdminSupabaseClient } from '@/lib/supabase/admin';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
-import { NotFoundError, DatabaseError, PermissionDeniedError } from '@/lib/api/errors';
+import {
+  NotFoundError,
+  DatabaseError,
+  PermissionDeniedError,
+  ValidationError,
+} from '@/lib/api/errors';
 import type {
   FileRecord,
   FileLink,
   FileWithLinks,
   LinkFileToRecordInput,
+  LinkFileForModuleInput,
+  DocumentCenterModule,
   ListFilesFilters,
 } from '@/types/files';
 import type { RequestContext } from '@/types/api';
@@ -17,6 +24,17 @@ const BUCKET = 'documents';
 const FILE_COLUMNS =
   'id, company_id, file_name, original_name, file_extension, mime_type, file_size, storage_path, uploaded_by, uploaded_at, checksum, ai_processed';
 const LINK_COLUMNS = 'id, company_id, file_id, site_id, module, record_id, created_by, created_at';
+
+// The closed set of modules FileService.linkForModule() accepts — see
+// types/files.ts's DocumentCenterModule doc comment for why this is a
+// separate, stricter allowlist from linkToRecord's generic `module: string`.
+const ALLOWED_MODULES: readonly DocumentCenterModule[] = [
+  'subject_documents',
+  'study_documents',
+  'study_drafts',
+  'staff_documents',
+  'regulatory_documents',
+];
 
 function computeChecksum(buffer: Buffer): string {
   return createHash('sha256').update(buffer).digest('hex');
@@ -56,6 +74,83 @@ async function assertSiteAuthorized(userId: string, fileId: string): Promise<voi
   throw new PermissionDeniedError('file:site_access');
 }
 
+// Shared storage-write + files-insert logic behind both the public,
+// permission-gated upload() and the internal, module-trusted
+// storeForModule() — callers are responsible for any permission check
+// before reaching this point. company_id is always ctx.company.id, never
+// caller-supplied.
+async function insertFileRecord(file: File, ctx: RequestContext): Promise<FileRecord> {
+  const supabase = await createServerSupabaseClient();
+  const buffer = Buffer.from(await file.arrayBuffer());
+  const checksum = computeChecksum(buffer);
+  const fileExtension = file.name.includes('.') ? (file.name.split('.').pop() ?? null) : null;
+  const storageKey = `${ctx.company.id}/${randomUUID()}_${file.name}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from(BUCKET)
+    .upload(storageKey, buffer, { contentType: file.type, upsert: false });
+
+  if (uploadError) {
+    throw new DatabaseError(`File upload failed: ${uploadError.message}`);
+  }
+
+  const { data, error } = await supabase
+    .from('files')
+    .insert({
+      company_id: ctx.company.id,
+      file_name: file.name,
+      original_name: file.name,
+      file_extension: fileExtension,
+      mime_type: file.type || null,
+      file_size: file.size,
+      storage_path: storageKey,
+      uploaded_by: ctx.user.id,
+      checksum,
+    })
+    .select(FILE_COLUMNS)
+    .single();
+
+  if (error || !data) {
+    // The storage object was written but the metadata row failed — clean
+    // up the orphan rather than leaving an unreferenced object behind.
+    await supabase.storage.from(BUCKET).remove([storageKey]);
+    throw new DatabaseError(error?.message ?? 'Failed to record uploaded file');
+  }
+
+  const fileRecord = data as FileRecord;
+
+  await AuditService.log({
+    company_id: ctx.company.id,
+    user_id: ctx.user.id,
+    action: 'file.uploaded',
+    module: 'documents',
+    record_type: 'files',
+    record_id: fileRecord.id,
+    new_value: { file_name: fileRecord.file_name, file_size: fileRecord.file_size },
+  });
+
+  return fileRecord;
+}
+
+// Re-verifies file ownership independently of any Document Center
+// permission — files_select's RLS is company-scoped only (no permission
+// gate), so a plain session-scoped SELECT is both a real security check
+// (not bypassed) and doesn't require view_documents. Used by
+// linkForModule(), which cannot rely on getMetadata() for this because
+// getMetadata() itself requires view_documents — exactly the substitution
+// this milestone must not introduce.
+async function assertFileBelongsToCompany(fileId: string, ctx: RequestContext): Promise<void> {
+  const supabase = await createServerSupabaseClient();
+  const { data, error } = await supabase
+    .from('files')
+    .select('id')
+    .eq('id', fileId)
+    .eq('company_id', ctx.company.id)
+    .maybeSingle();
+
+  if (error || !data) throw new NotFoundError('File');
+}
+
 export const FileService = {
   /**
    * Uploads a file into the private `documents` bucket and records its
@@ -64,57 +159,19 @@ export const FileService = {
    */
   async upload(file: File, ctx: RequestContext): Promise<FileRecord> {
     await PermissionService.requirePermission(ctx.user.id, 'upload_documents');
+    return insertFileRecord(file, ctx);
+  },
 
-    const supabase = await createServerSupabaseClient();
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const checksum = computeChecksum(buffer);
-    const fileExtension = file.name.includes('.') ? (file.name.split('.').pop() ?? null) : null;
-    const storageKey = `${ctx.company.id}/${randomUUID()}_${file.name}`;
-
-    const { error: uploadError } = await supabase.storage
-      .from(BUCKET)
-      .upload(storageKey, buffer, { contentType: file.type, upsert: false });
-
-    if (uploadError) {
-      throw new DatabaseError(`File upload failed: ${uploadError.message}`);
-    }
-
-    const { data, error } = await supabase
-      .from('files')
-      .insert({
-        company_id: ctx.company.id,
-        file_name: file.name,
-        original_name: file.name,
-        file_extension: fileExtension,
-        mime_type: file.type || null,
-        file_size: file.size,
-        storage_path: storageKey,
-        uploaded_by: ctx.user.id,
-        checksum,
-      })
-      .select(FILE_COLUMNS)
-      .single();
-
-    if (error || !data) {
-      // The storage object was written but the metadata row failed — clean
-      // up the orphan rather than leaving an unreferenced object behind.
-      await supabase.storage.from(BUCKET).remove([storageKey]);
-      throw new DatabaseError(error?.message ?? 'Failed to record uploaded file');
-    }
-
-    const fileRecord = data as FileRecord;
-
-    await AuditService.log({
-      company_id: ctx.company.id,
-      user_id: ctx.user.id,
-      action: 'file.uploaded',
-      module: 'documents',
-      record_type: 'files',
-      record_id: fileRecord.id,
-      new_value: { file_name: fileRecord.file_name, file_size: fileRecord.file_size },
-    });
-
-    return fileRecord;
+  /**
+   * Same storage/DB behavior as upload(), but with NO permission check of
+   * its own — for use only by other server-side module services that have
+   * already validated their own module-specific permission (e.g.
+   * edit_subject, upload_regulatory_document) before calling this. Never
+   * expose this through a public API route; upload_documents must remain
+   * the gate on the Document Center's own direct upload entry point.
+   */
+  async storeForModule(file: File, ctx: RequestContext): Promise<FileRecord> {
+    return insertFileRecord(file, ctx);
   },
 
   /**
@@ -306,6 +363,79 @@ export const FileService = {
       .single();
 
     if (error || !data) {
+      throw new DatabaseError(error?.message ?? 'Failed to link file to record');
+    }
+
+    const link = data as FileLink;
+
+    await AuditService.log({
+      company_id: ctx.company.id,
+      site_id: link.site_id,
+      user_id: ctx.user.id,
+      action: 'file.linked',
+      module: 'documents',
+      record_type: 'file_links',
+      record_id: link.id,
+      new_value: { file_id: input.file_id, module: input.module, record_id: input.record_id },
+    });
+
+    return link;
+  },
+
+  /**
+   * Links a file to a record on behalf of a trusted module service — NO
+   * Document Center permission check occurs here; the calling module's own
+   * module-specific permission check (already run before this is called) is
+   * the sole gate. Because this writes via the admin client (the file_links
+   * RLS insert policy requires upload_documents, which this caller may not
+   * hold), every invariant that policy would otherwise provide is
+   * independently re-verified in application code first:
+   *   1. module must be one of the closed DocumentCenterModule values
+   *   2. the file must belong to ctx.company.id (assertFileBelongsToCompany
+   *      — a real, RLS-backed check, not skipped)
+   *   3. site access is independently validated via PermissionService,
+   *      exactly as linkToRecord already does
+   * Only once all three pass does the admin-client insert happen. A
+   * duplicate (file_id, module, record_id) — e.g. a retried call after a
+   * transient failure — is treated as idempotent success, not an error.
+   */
+  async linkForModule(input: LinkFileForModuleInput, ctx: RequestContext): Promise<FileLink> {
+    if (!ALLOWED_MODULES.includes(input.module)) {
+      throw new ValidationError(`Invalid module for linkForModule: ${input.module}`);
+    }
+
+    await assertFileBelongsToCompany(input.file_id, ctx);
+
+    if (input.site_id) {
+      await PermissionService.requireSiteAccess(ctx.user.id, input.site_id);
+    }
+
+    const supabase = createAdminSupabaseClient();
+    const { data, error } = await supabase
+      .from('file_links')
+      .insert({
+        company_id: ctx.company.id,
+        file_id: input.file_id,
+        site_id: input.site_id ?? null,
+        module: input.module,
+        record_id: input.record_id,
+        created_by: ctx.user.id,
+      })
+      .select(LINK_COLUMNS)
+      .single();
+
+    if (error || !data) {
+      if (error?.code === '23505') {
+        // Already linked — same end state the caller wanted, not a failure.
+        const { data: existing } = await supabase
+          .from('file_links')
+          .select(LINK_COLUMNS)
+          .eq('file_id', input.file_id)
+          .eq('module', input.module)
+          .eq('record_id', input.record_id)
+          .single();
+        if (existing) return existing as FileLink;
+      }
       throw new DatabaseError(error?.message ?? 'Failed to link file to record');
     }
 

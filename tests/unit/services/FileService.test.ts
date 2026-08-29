@@ -4,7 +4,12 @@ import { createAdminSupabaseClient } from '@/lib/supabase/admin';
 import { FileService } from '@/services/files/FileService';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
-import { PermissionDeniedError, NotFoundError, DatabaseError } from '@/lib/api/errors';
+import {
+  PermissionDeniedError,
+  NotFoundError,
+  DatabaseError,
+  ValidationError,
+} from '@/lib/api/errors';
 
 vi.mock('@/services/audit/AuditService', () => ({
   AuditService: { log: vi.fn() },
@@ -529,5 +534,261 @@ describe('FileService.list', () => {
 
     const result = await FileService.list({}, makeCtx());
     expect(result).toEqual([]);
+  });
+});
+
+// ── storeForModule — Milestone 3.0: module-trusted upload, no permission gate ──
+
+describe('FileService.storeForModule', () => {
+  it('uploads without any Document Center permission check — the caller already validated its own module permission', async () => {
+    const requirePermissionSpy = vi.spyOn(PermissionService, 'requirePermission');
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile() }]),
+    );
+
+    const result = await FileService.storeForModule(fakeFile(), makeCtx());
+
+    expect(result.id).toBe(FILE_ID);
+    expect(result.company_id).toBe(COMPANY_ID);
+    // The whole point of storeForModule: no upload_documents (or any other)
+    // permission check happens inside FileService for this path.
+    expect(requirePermissionSpy).not.toHaveBeenCalled();
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'file.uploaded', company_id: COMPANY_ID }),
+    );
+  });
+
+  it('always writes company_id from ctx.company.id, never from any other source', async () => {
+    const insertSpy = vi.fn().mockReturnThis();
+    const stub = {
+      insert: insertSpy,
+      select: vi.fn().mockReturnThis(),
+      single: vi.fn().mockResolvedValue({ data: makeFile(), error: null }),
+    };
+    const from = vi.fn().mockReturnValue(stub);
+    const storageBucket = {
+      upload: vi.fn().mockResolvedValue({ data: {}, error: null }),
+      remove: vi.fn().mockResolvedValue({ data: {}, error: null }),
+    };
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce({
+      from,
+      storage: { from: vi.fn().mockReturnValue(storageBucket) },
+    } as never);
+
+    await FileService.storeForModule(fakeFile(), makeCtx());
+
+    expect(insertSpy).toHaveBeenCalledWith(expect.objectContaining({ company_id: COMPANY_ID }));
+  });
+
+  it('cleans up the orphaned storage object when the metadata insert fails (same behavior as upload())', async () => {
+    const removeMock = vi.fn().mockResolvedValue({ data: {}, error: null });
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: null, error: { message: 'insert failed' } }], {
+        remove: removeMock,
+      }),
+    );
+
+    await expect(FileService.storeForModule(fakeFile(), makeCtx())).rejects.toThrow(DatabaseError);
+    expect(removeMock).toHaveBeenCalled();
+  });
+
+  it('throws DatabaseError when the storage upload itself fails', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile() }], {
+        upload: vi.fn().mockResolvedValue({ data: null, error: { message: 'storage down' } }),
+      }),
+    );
+
+    await expect(FileService.storeForModule(fakeFile(), makeCtx())).rejects.toThrow(DatabaseError);
+  });
+
+  it('never generates or returns a public URL', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile() }]),
+    );
+
+    const result = await FileService.storeForModule(fakeFile(), makeCtx());
+
+    expect(result).not.toHaveProperty('url');
+    expect(result).not.toHaveProperty('signedUrl');
+    expect(result).not.toHaveProperty('publicUrl');
+  });
+});
+
+// ── linkForModule — Milestone 3.0: module-trusted linking, no permission gate ──
+
+describe('FileService.linkForModule', () => {
+  function makeAdminInsertClient(responses: Array<{ data: unknown; error?: unknown }>) {
+    const from = vi.fn();
+    for (const r of responses) {
+      from.mockReturnValueOnce(queryStub(r.data, r.error ?? null));
+    }
+    return { from } as never;
+  }
+
+  it('links successfully (company-scoped, no site) without any Document Center permission check', async () => {
+    const requirePermissionSpy = vi.spyOn(PermissionService, 'requirePermission');
+    // assertFileBelongsToCompany's own files lookup
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile() }]),
+    );
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce(
+      makeAdminInsertClient([{ data: makeLink({ module: 'subject_documents' }) }]),
+    );
+
+    const link = await FileService.linkForModule(
+      { file_id: FILE_ID, module: 'subject_documents', record_id: 'record-uuid' },
+      makeCtx(),
+    );
+
+    expect(link.company_id).toBe(COMPANY_ID);
+    expect(requirePermissionSpy).not.toHaveBeenCalled();
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'file.linked', company_id: COMPANY_ID }),
+    );
+  });
+
+  it('links successfully when a site is supplied and the caller has access to it', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile() }]),
+    );
+    vi.spyOn(PermissionService, 'requireSiteAccess').mockResolvedValue(undefined);
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce(
+      makeAdminInsertClient([{ data: makeLink({ module: 'staff_documents', site_id: SITE_ID }) }]),
+    );
+
+    const link = await FileService.linkForModule(
+      {
+        file_id: FILE_ID,
+        module: 'staff_documents',
+        record_id: 'record-uuid',
+        site_id: SITE_ID,
+      },
+      makeCtx(),
+    );
+
+    expect(link.site_id).toBe(SITE_ID);
+  });
+
+  it('rejects linking a file that belongs to a different company (no cross-company linking)', async () => {
+    // Simulates RLS-equivalent company scoping: the company-scoped filter
+    // finds nothing for a file that actually belongs to another company.
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: null, error: { message: 'no rows' } }]),
+    );
+
+    await expect(
+      FileService.linkForModule(
+        { file_id: FILE_ID, module: 'subject_documents', record_id: 'record-uuid' },
+        makeCtx(),
+      ),
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it('rejects linking to a site the caller cannot access (no cross-site linking)', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile() }]),
+    );
+    vi.spyOn(PermissionService, 'requireSiteAccess').mockRejectedValue(
+      new PermissionDeniedError(`site:${SITE_ID}`),
+    );
+
+    await expect(
+      FileService.linkForModule(
+        {
+          file_id: FILE_ID,
+          module: 'staff_documents',
+          record_id: 'record-uuid',
+          site_id: SITE_ID,
+        },
+        makeCtx(),
+      ),
+    ).rejects.toThrow(PermissionDeniedError);
+  });
+
+  it('rejects a module value outside the closed DocumentCenterModule allowlist', async () => {
+    await expect(
+      FileService.linkForModule(
+        {
+          file_id: FILE_ID,
+          // @ts-expect-error — deliberately outside the allowlist, proving the
+          // runtime check catches what TypeScript alone would already block.
+          module: 'not_a_real_module',
+          record_id: 'record-uuid',
+        },
+        makeCtx(),
+      ),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it('does not verify that record_id refers to an existing row (accepted design limitation of the polymorphic model — the calling module owns that guarantee)', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile() }]),
+    );
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce(
+      makeAdminInsertClient([{ data: makeLink({ module: 'study_drafts' }) }]),
+    );
+
+    // A record_id that doesn't correspond to any real study_drafts row is
+    // still accepted — FileService has no per-module table knowledge and
+    // never attempts this check, by design.
+    const link = await FileService.linkForModule(
+      { file_id: FILE_ID, module: 'study_drafts', record_id: 'nonexistent-record-uuid' },
+      makeCtx(),
+    );
+
+    expect(link).toBeTruthy();
+  });
+
+  it('treats a duplicate (file_id, module, record_id) link as idempotent success, not an error', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile() }]),
+    );
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce(
+      makeAdminInsertClient([
+        { data: null, error: { code: '23505', message: 'duplicate key' } },
+        { data: makeLink({ module: 'regulatory_documents' }) }, // fallback select finds the existing row
+      ]),
+    );
+
+    const link = await FileService.linkForModule(
+      { file_id: FILE_ID, module: 'regulatory_documents', record_id: 'record-uuid' },
+      makeCtx(),
+    );
+
+    expect(link.id).toBe(LINK_ID);
+  });
+
+  it('throws DatabaseError for a non-duplicate insert failure', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile() }]),
+    );
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce(
+      makeAdminInsertClient([{ data: null, error: { message: 'constraint violation' } }]),
+    );
+
+    await expect(
+      FileService.linkForModule(
+        { file_id: FILE_ID, module: 'regulatory_documents', record_id: 'record-uuid' },
+        makeCtx(),
+      ),
+    ).rejects.toThrow(DatabaseError);
+  });
+
+  it('never generates or returns a URL', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile() }]),
+    );
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce(
+      makeAdminInsertClient([{ data: makeLink({ module: 'study_documents' }) }]),
+    );
+
+    const link = await FileService.linkForModule(
+      { file_id: FILE_ID, module: 'study_documents', record_id: 'record-uuid' },
+      makeCtx(),
+    );
+
+    expect(link).not.toHaveProperty('url');
+    expect(link).not.toHaveProperty('signedUrl');
   });
 });
