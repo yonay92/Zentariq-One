@@ -455,6 +455,133 @@ export const FileService = {
     return link;
   },
 
+  /**
+   * Replaces the current Document Center association for a (module,
+   * record_id) pair with a new file — used by module retrofits like
+   * RegulatoryDocumentService.replace(), where a new version supersedes the
+   * previous one and the Document Center's association must follow. Same
+   * trust model as linkForModule: NO Document Center permission check here
+   * — the calling module's own permission is the sole gate — and every
+   * invariant file_links' own RLS would otherwise provide is independently
+   * re-verified in application code first, then written via the admin
+   * client.
+   *
+   * "Replace" here means: at most one file_links row exists for a given
+   * (company_id, module, record_id) once this returns successfully. That is
+   * NOT enforced by a database constraint — file_links' own uniqueness is on
+   * (file_id, module, record_id), not (module, record_id) alone (see
+   * 022_document_center_foundation.sql; several *different* files linked to
+   * the same record is a valid state for linkForModule/linkToRecord, e.g. a
+   * subject with multiple attachments). relinkForModule is the one
+   * operation that narrows this to "exactly one," and it does so with two
+   * sequential admin-client calls (insert-then-delete-stale), not a single
+   * atomic statement — the Supabase REST/JS client has no cross-statement
+   * transaction primitive available to application code. The new
+   * association is always written before any stale one is removed, so a
+   * failure between the two steps can only ever leave a transient DUPLICATE
+   * (new + stale both present — safely recoverable: a retry's own
+   * no-op/insert-then-cleanup logic converges it back to one), never a GAP
+   * (zero associations). If a true single-statement guarantee is ever
+   * required, promote this to a Postgres function (RPC) — flagged here as a
+   * known follow-up, not implemented in this sub-milestone.
+   */
+  async relinkForModule(input: LinkFileForModuleInput, ctx: RequestContext): Promise<FileLink> {
+    if (!ALLOWED_MODULES.includes(input.module)) {
+      throw new ValidationError(`Invalid module for relinkForModule: ${input.module}`);
+    }
+
+    await assertFileBelongsToCompany(input.file_id, ctx);
+
+    if (input.site_id) {
+      await PermissionService.requireSiteAccess(ctx.user.id, input.site_id);
+    }
+
+    const supabase = createAdminSupabaseClient();
+
+    const { data: existingRows, error: existingError } = await supabase
+      .from('file_links')
+      .select(LINK_COLUMNS)
+      .eq('company_id', ctx.company.id)
+      .eq('module', input.module)
+      .eq('record_id', input.record_id);
+
+    if (existingError) {
+      throw new DatabaseError(existingError.message);
+    }
+
+    const existing = (existingRows as FileLink[] | null) ?? [];
+    const desiredSiteId = input.site_id ?? null;
+
+    // Idempotent no-op: the desired association is already the sole one in
+    // place — nothing to insert, nothing to clean up.
+    const exactMatch = existing.find(
+      (l) => l.file_id === input.file_id && (l.site_id ?? null) === desiredSiteId,
+    );
+    if (exactMatch && existing.length === 1) {
+      return exactMatch;
+    }
+
+    const { data: inserted, error: insertError } = await supabase
+      .from('file_links')
+      .insert({
+        company_id: ctx.company.id,
+        file_id: input.file_id,
+        site_id: desiredSiteId,
+        module: input.module,
+        record_id: input.record_id,
+        created_by: ctx.user.id,
+      })
+      .select(LINK_COLUMNS)
+      .single();
+
+    let newLink: FileLink;
+    if (insertError || !inserted) {
+      if (insertError?.code === '23505') {
+        // The desired (file_id, module, record_id) link already exists
+        // (e.g. a retried call after a transient failure) — reuse it rather
+        // than treating this as an error, same precedent as linkForModule.
+        const survivor = exactMatch ?? existing.find((l) => l.file_id === input.file_id);
+        if (!survivor) {
+          throw new DatabaseError(insertError.message ?? 'Failed to relink file to record');
+        }
+        newLink = survivor;
+      } else {
+        throw new DatabaseError(insertError?.message ?? 'Failed to relink file to record');
+      }
+    } else {
+      newLink = inserted as FileLink;
+    }
+
+    const staleIds = existing.filter((l) => l.id !== newLink.id).map((l) => l.id);
+    if (staleIds.length > 0) {
+      const { error: deleteError } = await supabase
+        .from('file_links')
+        .delete()
+        .eq('company_id', ctx.company.id)
+        .in('id', staleIds);
+
+      if (deleteError) {
+        throw new DatabaseError(
+          `Relinked file but failed to remove ${staleIds.length} superseded association(s): ${deleteError.message}`,
+        );
+      }
+    }
+
+    await AuditService.log({
+      company_id: ctx.company.id,
+      site_id: newLink.site_id,
+      user_id: ctx.user.id,
+      action: 'file.relinked',
+      module: 'documents',
+      record_type: 'file_links',
+      record_id: newLink.id,
+      ...(staleIds.length > 0 ? { old_value: { superseded_link_ids: staleIds } } : {}),
+      new_value: { file_id: input.file_id, module: input.module, record_id: input.record_id },
+    });
+
+    return newLink;
+  },
+
   /** Removes a file_links row. The underlying file/storage object is untouched. */
   async unlink(fileLinkId: string, ctx: RequestContext): Promise<void> {
     await PermissionService.requirePermission(ctx.user.id, 'upload_documents');

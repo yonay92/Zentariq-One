@@ -149,6 +149,38 @@ async function linkToDocumentCenter(
   }
 }
 
+// Best-effort Document Center relink — never blocks the primary Regulatory
+// replacement, same failure semantics as linkToDocumentCenter above (see its
+// comment for the full rationale). Called ONLY after replace()'s own
+// Regulatory writes (supersede previous version, insert new version,
+// finalize the slot, history, audit) have already succeeded — a relink
+// failure means the Document Center still points at the now-superseded
+// version until the next successful replace()/relink or the Sub-Milestone
+// 3.5 backfill, never a partial or rolled-back Regulatory write.
+async function relinkDocumentCenter(
+  fileId: string,
+  document: RegulatoryDocument,
+  ctx: RequestContext,
+): Promise<void> {
+  try {
+    await FileService.relinkForModule(
+      {
+        file_id: fileId,
+        module: 'regulatory_documents',
+        record_id: document.id,
+        site_id: document.site_id,
+      },
+      ctx,
+    );
+  } catch (err) {
+    logger.error('RegulatoryDocumentService: relinkForModule failed', {
+      document_id: document.id,
+      file_id: fileId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 async function uploadFile(
   file: File,
   storageKey: string,
@@ -586,6 +618,8 @@ export const RegulatoryDocumentService = {
       record_id: previousVersion.id,
       new_value: { superseded_by_version: nextVersionLabel },
     });
+
+    await relinkDocumentCenter(fileId, updated as RegulatoryDocument, ctx);
 
     return updated as RegulatoryDocument;
   },

@@ -555,6 +555,7 @@ describe('RegulatoryDocumentService.create — Document Center retrofit', () => 
 describe('RegulatoryDocumentService.replace — baseline (pre- and post-retrofit)', () => {
   it('uploads the new file, supersedes the previous version, and returns the finalized pending_review document (existing response shape)', async () => {
     vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'relinkForModule').mockResolvedValue({} as FileLink);
     const previousVersion = baseVersion({
       id: 'version-a-uuid',
       version: 'v1',
@@ -591,6 +592,183 @@ describe('RegulatoryDocumentService.replace — baseline (pre- and post-retrofit
     expect(AuditService.log).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'regulatory_document.replaced', company_id: COMPANY_ID }),
     );
+  });
+});
+
+// ── Sub-Milestone 3.1b: Document Center retrofit for replace() ─────────────
+//
+// Mirrors create()'s Document Center retrofit tests above, but for
+// relinkForModule instead of linkForModule: the relink call must happen
+// only AFTER replace()'s own Regulatory writes have already succeeded (see
+// successClient below — the relink spy is asserted against calls made once
+// the full 9-step client sequence has already resolved), must carry the
+// exact file_id/record_id/site_id the existing flow produced, and must
+// never block or roll back an otherwise-successful replace() when it fails.
+
+describe('RegulatoryDocumentService.replace — Document Center retrofit (Sub-Milestone 3.1b)', () => {
+  function successClient(newFileId: string, siteId: string | null = SITE_ID) {
+    const previousVersion = baseVersion({
+      id: 'version-a-uuid',
+      version: 'v1',
+      file_id: 'file-a-uuid',
+    });
+    return makeSupabaseClientWithStorage([
+      { data: baseDocument({ status: 'current', site_id: siteId }) }, // 1. getDocumentOrThrow
+      { data: null }, // 2. checksum lookup — no match, proceed
+      { data: previousVersion }, // 3. getCurrentVersion
+      { data: null }, // 4. supersede previous version update
+      { data: { id: newFileId } }, // 5. files insert (uploadFile)
+      { data: null }, // 6. document_versions insert (new version)
+      {
+        data: baseDocument({
+          status: 'pending_review',
+          file_id: newFileId,
+          version: 'v2',
+          site_id: siteId,
+        }),
+      }, // 7. regulatory_documents finalize update
+      { data: null }, // 8. document_history insert (supersede)
+      { data: null }, // 9. document_history insert (new pending_review)
+    ]);
+  }
+
+  it('relinks the Document Center to the new file with the canonical module/record/site identifiers', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const relinkSpy = vi.spyOn(FileService, 'relinkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'file-b-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(successClient(newFileId));
+
+    const result = await RegulatoryDocumentService.replace(
+      DOCUMENT_ID,
+      makeFile('form-v2.pdf', 'new content'),
+      { replacement_reason: 'annual renewal' },
+      makeCtx(),
+    );
+    const document = result as RegulatoryDocument;
+
+    expect(relinkSpy).toHaveBeenCalledWith(
+      {
+        file_id: newFileId,
+        module: 'regulatory_documents',
+        record_id: document.id,
+        site_id: SITE_ID,
+      },
+      expect.anything(),
+    );
+  });
+
+  it('does not duplicate or reconstruct identifiers — uses the actual replacement file_id and document.id produced by the existing flow', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const relinkSpy = vi.spyOn(FileService, 'relinkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'distinct-file-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(successClient(newFileId));
+
+    await RegulatoryDocumentService.replace(
+      DOCUMENT_ID,
+      makeFile('form-v2.pdf', 'new content'),
+      { replacement_reason: 'annual renewal' },
+      makeCtx(),
+    );
+
+    const callArgs = relinkSpy.mock.calls[0]?.[0];
+    expect(callArgs?.file_id).toBe(newFileId); // the exact id uploadFile() produced for the replacement
+    expect(callArgs?.record_id).toBe(DOCUMENT_ID); // the exact regulatory_documents.id, unchanged by replace()
+  });
+
+  it('passes the authoritative site_id from the regulatory document, including null for a company-wide document', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const relinkSpy = vi.spyOn(FileService, 'relinkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'file-b-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(successClient(newFileId, null));
+
+    await RegulatoryDocumentService.replace(
+      DOCUMENT_ID,
+      makeFile('form-v2.pdf', 'new content'),
+      { replacement_reason: 'annual renewal' },
+      makeCtx(),
+    );
+
+    expect(relinkSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ site_id: null }),
+      expect.anything(),
+    );
+  });
+
+  it('still succeeds and returns the finalized document when relinkForModule fails (failure is logged, not swallowed silently, and never rolled back)', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'relinkForModule').mockRejectedValue(
+      new Error('file_links relink failed'),
+    );
+    const newFileId = 'file-b-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(successClient(newFileId));
+
+    const result = await RegulatoryDocumentService.replace(
+      DOCUMENT_ID,
+      makeFile('form-v2.pdf', 'new content'),
+      { replacement_reason: 'annual renewal' },
+      makeCtx(),
+    );
+
+    // The Regulatory replacement is unaffected by a Document Center relink failure.
+    expect(result).not.toHaveProperty('duplicate_detected');
+    const document = result as RegulatoryDocument;
+    expect(document.status).toBe('pending_review');
+    expect(document.file_id).toBe(newFileId);
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'regulatory_document.replaced' }),
+    );
+  });
+
+  it('never exposes a public URL from the Document Center relink', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'relinkForModule').mockResolvedValue({
+      id: 'link-uuid',
+      company_id: COMPANY_ID,
+      file_id: 'file-b-uuid',
+      site_id: SITE_ID,
+      module: 'regulatory_documents',
+      record_id: DOCUMENT_ID,
+      created_by: USER_ID,
+      created_at: new Date().toISOString(),
+    } as FileLink);
+    const newFileId = 'file-b-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(successClient(newFileId));
+
+    const result = await RegulatoryDocumentService.replace(
+      DOCUMENT_ID,
+      makeFile('form-v2.pdf', 'new content'),
+      { replacement_reason: 'annual renewal' },
+      makeCtx(),
+    );
+
+    expect(result).not.toHaveProperty('url');
+    expect(result).not.toHaveProperty('signedUrl');
+    expect(result).not.toHaveProperty('publicUrl');
+  });
+
+  it('archive() still succeeds on a document that was previously replaced — relink is isolated to file_links and never touches regulatory_documents/document_versions state', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const replacedVersion = baseVersion({
+      id: 'version-b-uuid',
+      version: 'v2',
+      previous_version_id: 'version-a-uuid',
+      status: 'pending_review',
+    });
+    const client = makeSupabaseClient(
+      { data: baseDocument({ status: 'pending_review' }) }, // getDocumentOrThrow
+      { data: replacedVersion }, // getCurrentVersion → the replaced version, correctly current
+      { data: null }, // document_versions update (archived)
+      { data: baseDocument({ status: 'archived' }) }, // regulatory_documents update
+      { data: null }, // document_history insert
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await RegulatoryDocumentService.archive(
+      DOCUMENT_ID,
+      { reason: 'study closed' },
+      makeCtx(),
+    );
+    expect(result.status).toBe('archived');
   });
 });
 
@@ -631,6 +809,7 @@ describe('RegulatoryDocumentService — is_current invariant (Sub-Milestone 3.1a
 
   it('B: first replace() writes the previous version as not-current and the new version as current — exactly one current version', async () => {
     vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'relinkForModule').mockResolvedValue({} as FileLink);
     const versionA = baseVersion({ id: 'version-a-uuid', version: 'v1', file_id: 'file-a-uuid' });
     const fileB = 'file-b-uuid';
     const { client, stubs } = makeSupabaseClientWithCapture([
@@ -674,6 +853,7 @@ describe('RegulatoryDocumentService — is_current invariant (Sub-Milestone 3.1a
 
   it('C: second replace() on the same document finds B via getCurrentVersion (the fix), supersedes B, and makes C current — this call used to throw BusinessRuleError before the fix', async () => {
     vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'relinkForModule').mockResolvedValue({} as FileLink);
     // Simulates the document's state exactly as B's replace() (test above)
     // left it, now that the fix means B was actually written as is_current: true.
     const versionB = baseVersion({

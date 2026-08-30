@@ -366,6 +366,264 @@ describe('FileService.linkToRecord', () => {
   });
 });
 
+// ── relinkForModule — Sub-Milestone 3.1b: replace the active association ──
+
+describe('FileService.relinkForModule', () => {
+  const OLD_LINK_ID = 'old-link-uuid';
+  const OLD_FILE_ID = 'old-file-uuid';
+  const NEW_FILE_ID = 'new-file-uuid';
+
+  function makeAdminClient(responses: Array<{ data: unknown; error?: unknown }>) {
+    const from = vi.fn();
+    for (const r of responses) {
+      from.mockReturnValueOnce(queryStub(r.data, r.error ?? null));
+    }
+    return { from } as never;
+  }
+
+  function makeOldLink(overrides: Record<string, unknown> = {}) {
+    return makeLink({
+      id: OLD_LINK_ID,
+      file_id: OLD_FILE_ID,
+      module: 'regulatory_documents',
+      ...overrides,
+    });
+  }
+
+  function makeNewLink(overrides: Record<string, unknown> = {}) {
+    return makeLink({
+      id: LINK_ID,
+      file_id: NEW_FILE_ID,
+      module: 'regulatory_documents',
+      ...overrides,
+    });
+  }
+
+  it('relinks successfully when no prior association exists', async () => {
+    // assertFileBelongsToCompany's own files lookup
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile({ id: NEW_FILE_ID }) }]),
+    );
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce(
+      makeAdminClient([
+        { data: [] }, // existing-links lookup — none yet
+        { data: makeNewLink() }, // insert
+      ]),
+    );
+
+    const link = await FileService.relinkForModule(
+      { file_id: NEW_FILE_ID, module: 'regulatory_documents', record_id: 'record-uuid' },
+      makeCtx(),
+    );
+
+    expect(link.file_id).toBe(NEW_FILE_ID);
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'file.relinked', company_id: COMPANY_ID }),
+    );
+  });
+
+  it('removes the old link when relinking to a new file for the same record', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile({ id: NEW_FILE_ID }) }]),
+    );
+    const deleteStub = queryStub(null, null);
+    const from = vi.fn();
+    from
+      .mockReturnValueOnce(queryStub([makeOldLink()])) // existing-links lookup
+      .mockReturnValueOnce(queryStub(makeNewLink())) // insert
+      .mockReturnValueOnce(deleteStub); // delete stale link(s)
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce({ from } as never);
+
+    await FileService.relinkForModule(
+      { file_id: NEW_FILE_ID, module: 'regulatory_documents', record_id: 'record-uuid' },
+      makeCtx(),
+    );
+
+    expect(deleteStub.in).toHaveBeenCalledWith('id', [OLD_LINK_ID]);
+  });
+
+  it('leaves exactly one resulting association after relinking over an existing one', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile({ id: NEW_FILE_ID }) }]),
+    );
+    const deleteStub = queryStub(null, null);
+    const from = vi.fn();
+    from
+      .mockReturnValueOnce(queryStub([makeOldLink()]))
+      .mockReturnValueOnce(queryStub(makeNewLink()))
+      .mockReturnValueOnce(deleteStub);
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce({ from } as never);
+
+    const link = await FileService.relinkForModule(
+      { file_id: NEW_FILE_ID, module: 'regulatory_documents', record_id: 'record-uuid' },
+      makeCtx(),
+    );
+
+    // Exactly one surviving id (the new link) — the old one was targeted for deletion.
+    expect(link.id).toBe(LINK_ID);
+    expect(deleteStub.in).toHaveBeenCalledWith('id', [OLD_LINK_ID]);
+    expect(deleteStub.in).not.toHaveBeenCalledWith('id', expect.arrayContaining([LINK_ID]));
+  });
+
+  it('is idempotent — retrying with the exact same input performs no writes', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile({ id: NEW_FILE_ID }) }]),
+    );
+    const from = vi.fn();
+    from.mockReturnValueOnce(queryStub([makeNewLink()])); // already the sole existing association
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce({ from } as never);
+
+    const link = await FileService.relinkForModule(
+      { file_id: NEW_FILE_ID, module: 'regulatory_documents', record_id: 'record-uuid' },
+      makeCtx(),
+    );
+
+    expect(link.id).toBe(LINK_ID);
+    // Only the existing-links lookup ran — no insert, no delete.
+    expect(from).toHaveBeenCalledTimes(1);
+    expect(AuditService.log).not.toHaveBeenCalled();
+  });
+
+  it("rejects relinking a file that belongs to a different company (cannot relink Company B's files)", async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: null, error: { message: 'no rows' } }]),
+    );
+
+    await expect(
+      FileService.relinkForModule(
+        { file_id: NEW_FILE_ID, module: 'regulatory_documents', record_id: 'record-uuid' },
+        makeCtx(),
+      ),
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it('rejects relinking to a site the caller cannot access (no cross-site relinking)', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile({ id: NEW_FILE_ID }) }]),
+    );
+    vi.spyOn(PermissionService, 'requireSiteAccess').mockRejectedValue(
+      new PermissionDeniedError(`site:${SITE_ID}`),
+    );
+
+    await expect(
+      FileService.relinkForModule(
+        {
+          file_id: NEW_FILE_ID,
+          module: 'regulatory_documents',
+          record_id: 'record-uuid',
+          site_id: SITE_ID,
+        },
+        makeCtx(),
+      ),
+    ).rejects.toThrow(PermissionDeniedError);
+  });
+
+  it('rejects a module value outside the closed DocumentCenterModule allowlist', async () => {
+    await expect(
+      FileService.relinkForModule(
+        {
+          file_id: NEW_FILE_ID,
+          // @ts-expect-error — deliberately outside the allowlist.
+          module: 'not_a_real_module',
+          record_id: 'record-uuid',
+        },
+        makeCtx(),
+      ),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it('rejects relinking a file that does not exist (missing/non-owned file)', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: null, error: null }]),
+    );
+
+    await expect(
+      FileService.relinkForModule(
+        {
+          file_id: 'nonexistent-file-uuid',
+          module: 'regulatory_documents',
+          record_id: 'record-uuid',
+        },
+        makeCtx(),
+      ),
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it('never generates or returns a public URL', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile({ id: NEW_FILE_ID }) }]),
+    );
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce(
+      makeAdminClient([{ data: [] }, { data: makeNewLink() }]),
+    );
+
+    const link = await FileService.relinkForModule(
+      { file_id: NEW_FILE_ID, module: 'regulatory_documents', record_id: 'record-uuid' },
+      makeCtx(),
+    );
+
+    expect(link).not.toHaveProperty('url');
+    expect(link).not.toHaveProperty('signedUrl');
+    expect(link).not.toHaveProperty('publicUrl');
+  });
+
+  it('throws DatabaseError for a non-duplicate insert failure', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile({ id: NEW_FILE_ID }) }]),
+    );
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce(
+      makeAdminClient([{ data: [] }, { data: null, error: { message: 'constraint violation' } }]),
+    );
+
+    await expect(
+      FileService.relinkForModule(
+        { file_id: NEW_FILE_ID, module: 'regulatory_documents', record_id: 'record-uuid' },
+        makeCtx(),
+      ),
+    ).rejects.toThrow(DatabaseError);
+  });
+
+  it('treats a duplicate (file_id, module, record_id) insert as recoverable and still cleans up stale links', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile({ id: NEW_FILE_ID }) }]),
+    );
+    const deleteStub = queryStub(null, null);
+    const from = vi.fn();
+    from
+      .mockReturnValueOnce(queryStub([makeOldLink(), makeNewLink()])) // both already present
+      .mockReturnValueOnce(queryStub(null, { code: '23505', message: 'duplicate key' })) // insert collides
+      .mockReturnValueOnce(deleteStub); // stale cleanup still runs
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce({ from } as never);
+
+    const link = await FileService.relinkForModule(
+      { file_id: NEW_FILE_ID, module: 'regulatory_documents', record_id: 'record-uuid' },
+      makeCtx(),
+    );
+
+    expect(link.id).toBe(LINK_ID);
+    expect(deleteStub.in).toHaveBeenCalledWith('id', [OLD_LINK_ID]);
+  });
+
+  it('throws DatabaseError when the stale-link cleanup delete fails, surfacing the transient duplicate rather than hiding it', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient([{ data: makeFile({ id: NEW_FILE_ID }) }]),
+    );
+    const from = vi.fn();
+    from
+      .mockReturnValueOnce(queryStub([makeOldLink()]))
+      .mockReturnValueOnce(queryStub(makeNewLink()))
+      .mockReturnValueOnce(queryStub(null, { message: 'delete failed' }));
+    vi.mocked(createAdminSupabaseClient).mockReturnValueOnce({ from } as never);
+
+    await expect(
+      FileService.relinkForModule(
+        { file_id: NEW_FILE_ID, module: 'regulatory_documents', record_id: 'record-uuid' },
+        makeCtx(),
+      ),
+    ).rejects.toThrow(DatabaseError);
+  });
+});
+
 // ── unlink ───────────────────────────────────────────────────────────────
 
 describe('FileService.unlink', () => {
