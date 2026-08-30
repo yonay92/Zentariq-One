@@ -3,6 +3,7 @@ import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { NotificationService } from '@/services/notifications/NotificationService';
 import { VisitService } from '@/services/visits/VisitService';
+import { FileService } from '@/services/files/FileService';
 import { getVisitLockStatus, sortVisitsByOrder } from '@/lib/utils/visitSequencing';
 import {
   NotFoundError,
@@ -10,6 +11,7 @@ import {
   BusinessRuleError,
   DuplicateRecordError,
 } from '@/lib/api/errors';
+import { logger } from '@/lib/logger';
 import type {
   Subject,
   SubjectStatus,
@@ -95,6 +97,41 @@ function addDaysToDateString(dateStr: string, days: number): string {
   const date = new Date(Date.UTC(year, month - 1, day));
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
+}
+
+// Best-effort Document Center visibility — never blocks the primary Subject
+// document upload. Same failure semantics as
+// RegulatoryDocumentService.linkToDocumentCenter/StaffCredentialService.linkToDocumentCenter
+// (see those functions' comments for the full rationale). Subjects uses a
+// multi-attachment model (see 3.3A audit): every subject_documents row is
+// its own independent logical document, so record_id is the individual
+// subject_documents row's id — NOT subject_id — and each upload produces
+// its own, separate file_links association. There is no replace/version
+// concept here, so only linkForModule is ever used; relinkForModule does
+// not apply.
+async function linkToDocumentCenter(
+  fileId: string,
+  subjectDocument: SubjectDocument,
+  subject: Subject,
+  ctx: RequestContext,
+): Promise<void> {
+  try {
+    await FileService.linkForModule(
+      {
+        file_id: fileId,
+        module: 'subject_documents',
+        record_id: subjectDocument.id,
+        site_id: subject.site_id,
+      },
+      ctx,
+    );
+  } catch (err) {
+    logger.error('SubjectService: linkForModule failed', {
+      subject_document_id: subjectDocument.id,
+      file_id: fileId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 export const SubjectService = {
@@ -1046,12 +1083,14 @@ export const SubjectService = {
       throw new DatabaseError(fileError?.message ?? 'Failed to record uploaded file');
     }
 
+    const fileId = (fileRow as { id: string }).id;
+
     const { data, error } = await supabase
       .from('subject_documents')
       .insert({
         company_id: ctx.company.id,
         subject_id: subjectId,
-        file_id: (fileRow as { id: string }).id,
+        file_id: fileId,
         document_type: documentType ?? null,
         uploaded_by: ctx.user.id,
       })
@@ -1060,6 +1099,8 @@ export const SubjectService = {
 
     if (error || !data) throw new DatabaseError(error?.message ?? 'Failed to link document');
 
+    const subjectDocument = data as SubjectDocument;
+
     await AuditService.log({
       company_id: ctx.company.id,
       site_id: subject.site_id,
@@ -1067,11 +1108,13 @@ export const SubjectService = {
       action: 'subject.document_uploaded',
       module: 'subjects',
       record_type: 'subject_documents',
-      record_id: (data as SubjectDocument).id,
+      record_id: subjectDocument.id,
       new_value: { subject_id: subjectId, file_name: file.name },
     });
 
-    return data as SubjectDocument;
+    await linkToDocumentCenter(fileId, subjectDocument, subject, ctx);
+
+    return subjectDocument;
   },
 
   async listDocuments(subjectId: string, ctx: RequestContext): Promise<SubjectDocument[]> {

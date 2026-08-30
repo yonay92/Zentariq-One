@@ -4,7 +4,14 @@ import { SubjectService } from '@/services/subjects/SubjectService';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { NotificationService } from '@/services/notifications/NotificationService';
-import { PermissionDeniedError, BusinessRuleError, NotFoundError } from '@/lib/api/errors';
+import { FileService } from '@/services/files/FileService';
+import {
+  PermissionDeniedError,
+  BusinessRuleError,
+  NotFoundError,
+  DatabaseError,
+} from '@/lib/api/errors';
+import type { FileLink } from '@/types/files';
 
 vi.mock('@/services/audit/AuditService', () => ({
   AuditService: { log: vi.fn() },
@@ -1208,6 +1215,686 @@ describe('SubjectService.listVisits', () => {
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
     const result = await SubjectService.listVisits(SUBJECT_ID, makeCtx());
+    expect(result).toEqual([]);
+  });
+});
+
+// ── uploadDocument / listDocuments — baseline characterization ─────────────
+// Sub-Milestone 3.3 Phase A.
+//
+// SubjectService.uploadDocument()/listDocuments() had ZERO test coverage
+// before this block. These tests lock down CURRENT behavior — including
+// undesirable behavior — BEFORE any Document Center retrofit touches them.
+// No production code is changed to make these tests pass.
+//
+// Architectural facts this characterization establishes (see the 3.3A audit
+// report for the full analysis):
+//   - subject_documents is a flat, per-upload table: every call to
+//     uploadDocument() inserts an independent row with its OWN file_id.
+//     There is no "slot" column, no version, no is_current, no replace/
+//     archive/delete method anywhere in this service. Multiple documents of
+//     the same document_type for the same subject are freely allowed (no
+//     uniqueness constraint), unlike Regulatory/Staff Credentials' one-slot-
+//     per-scope model.
+//   - subject_documents has NO site_id column of its own. The only site
+//     enforcement in this path is indirect: getById()'s own RLS-backed
+//     company+site scoping (subjects_select requires can_access_site).
+//     uploadDocument() itself never calls PermissionService.requireSiteAccess.
+//   - The storage key is `${company_id}/${subjectId}/${Date.now()}_${file.name}`
+//     — Date.now() (millisecond epoch), not a UUID. A theoretical collision
+//     risk (two uploads of the same filename to the same subject within the
+//     same millisecond) exists and is characterized, not fixed, here.
+//   - No orphan cleanup exists at any step: neither a failed storage upload
+//     nor a failed subject_documents insert (after a successful files
+//     insert) removes what was already written.
+
+describe('SubjectService.uploadDocument — baseline characterization', () => {
+  function baseSubject(overrides: Record<string, unknown> = {}) {
+    return {
+      id: SUBJECT_ID,
+      company_id: COMPANY_ID,
+      site_id: SITE_ID,
+      study_id: STUDY_ID,
+      subject_number: '001-001',
+      initials: 'A.B.',
+      status: 'active',
+      screening_date: null,
+      baseline_date: null,
+      randomization_date: null,
+      randomization_number: null,
+      end_of_study_date: null,
+      created_by: USER_ID,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  function makeSubjectDocumentRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'subject-doc-uuid',
+      company_id: COMPANY_ID,
+      subject_id: SUBJECT_ID,
+      file_id: 'file-uuid',
+      document_type: null,
+      uploaded_by: USER_ID,
+      uploaded_at: new Date().toISOString(),
+      notes: null,
+      ...overrides,
+    };
+  }
+
+  // No `storage` property on the plain queryStub-based client used
+  // elsewhere in this file — cannot reach uploadDocument()'s
+  // supabase.storage.from('subject-documents').upload() call. This variant
+  // adds that support without touching the file's original
+  // makeSupabaseClient (used, unmodified, by every pre-existing test).
+  function makeSupabaseClientWithStorage(
+    responses: Array<{ data: unknown; error?: unknown }>,
+    storage?: { upload?: unknown },
+  ) {
+    const from = vi.fn();
+    for (const r of responses) {
+      from.mockReturnValueOnce(queryStub(r.data, r.error ?? null));
+    }
+    const storageBucket = {
+      upload: storage?.upload ?? vi.fn().mockResolvedValue({ data: {}, error: null }),
+    };
+    return { from, storage: { from: vi.fn().mockReturnValue(storageBucket) } } as never;
+  }
+
+  function makeSupabaseClientWithCapture(
+    responses: Array<{ data: unknown; error?: unknown }>,
+    storage?: { upload?: unknown },
+  ) {
+    const stubs = responses.map((r) => queryStub(r.data, r.error ?? null));
+    const from = vi.fn();
+    for (const stub of stubs) {
+      from.mockReturnValueOnce(stub);
+    }
+    const storageBucket = {
+      upload: storage?.upload ?? vi.fn().mockResolvedValue({ data: {}, error: null }),
+    };
+    const client = { from, storage: { from: vi.fn().mockReturnValue(storageBucket) } } as never;
+    return { client, stubs };
+  }
+
+  function callArgsOf(
+    stub: Record<string, unknown> | undefined,
+    method: 'insert' | 'update',
+    callIndex = 0,
+  ): unknown {
+    const fn = stub?.[method] as ReturnType<typeof vi.fn> | undefined;
+    return fn?.mock.calls[callIndex]?.[0];
+  }
+
+  function makeFile(name: string, content: string, type = 'application/pdf'): File {
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(content);
+    return {
+      name,
+      type,
+      size: bytes.byteLength,
+      arrayBuffer: async () => bytes.buffer,
+    } as unknown as File;
+  }
+
+  it('throws PermissionDeniedError without edit_subject', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('edit_subject'),
+    );
+
+    await expect(
+      SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx()),
+    ).rejects.toThrow(PermissionDeniedError);
+  });
+
+  it('throws NotFoundError for a subject belonging to a different company (company isolation, and the only site-isolation gate this path has)', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClientWithStorage([{ data: null, error: { message: 'no rows' } }]),
+    );
+
+    await expect(
+      SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx()),
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it('does not call PermissionService.requireSiteAccess — site isolation for this path is entirely indirect, via getById()’s own RLS-backed scoping', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const requireSiteAccessSpy = vi.spyOn(PermissionService, 'requireSiteAccess');
+    const newFileId = 'new-file-uuid';
+    const client = makeSupabaseClientWithStorage([
+      { data: baseSubject() }, // getById
+      { data: { id: newFileId } }, // files insert
+      { data: makeSubjectDocumentRow({ file_id: newFileId }) }, // subject_documents insert
+    ]);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx());
+
+    expect(requireSiteAccessSpy).not.toHaveBeenCalled();
+  });
+
+  it('uploads to the subject-documents bucket at {company}/{subject}/{timestamp}_{filename}, records the file, links it to the subject, and audits it', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'new-file-uuid';
+    const uploadSpy = vi.fn().mockResolvedValue({ data: {}, error: null });
+    const client = makeSupabaseClientWithStorage(
+      [
+        { data: baseSubject() }, // getById
+        { data: { id: newFileId } }, // files insert
+        { data: makeSubjectDocumentRow({ file_id: newFileId }) }, // subject_documents insert
+      ],
+      { upload: uploadSpy },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await SubjectService.uploadDocument(
+      SUBJECT_ID,
+      makeFile('consent.pdf', 'content'),
+      makeCtx(),
+    );
+
+    expect(uploadSpy).toHaveBeenCalled();
+    const storageKey = uploadSpy.mock.calls[0]?.[0] as string;
+    // Path convention: {company}/{subjectId}/{Date.now()}_{filename} — a
+    // millisecond timestamp, not a UUID (characterized, not fixed, here).
+    expect(storageKey).toMatch(new RegExp(`^${COMPANY_ID}/${SUBJECT_ID}/\\d+_consent\\.pdf$`));
+
+    expect(result.file_id).toBe(newFileId);
+    expect(result.subject_id).toBe(SUBJECT_ID);
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'subject.document_uploaded',
+        company_id: COMPANY_ID,
+        site_id: SITE_ID,
+      }),
+    );
+  });
+
+  it('persists company_id, subject_id, and file_id exactly as produced by this flow — never any other source', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'distinct-file-uuid';
+    const { client, stubs } = makeSupabaseClientWithCapture([
+      { data: baseSubject() },
+      { data: { id: newFileId } },
+      { data: makeSubjectDocumentRow({ file_id: newFileId }) },
+    ]);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await SubjectService.uploadDocument(
+      SUBJECT_ID,
+      makeFile('consent.pdf', 'content'),
+      makeCtx(),
+      'consent_form',
+    );
+
+    const fileInsertArgs = callArgsOf(stubs[1], 'insert') as Record<string, unknown>;
+    expect(fileInsertArgs).toMatchObject({ company_id: COMPANY_ID });
+
+    const docInsertArgs = callArgsOf(stubs[2], 'insert') as Record<string, unknown>;
+    expect(docInsertArgs).toMatchObject({
+      company_id: COMPANY_ID,
+      subject_id: SUBJECT_ID,
+      file_id: newFileId,
+      document_type: 'consent_form',
+    });
+  });
+
+  it('passes null document_type when none is supplied', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'new-file-uuid';
+    const { client, stubs } = makeSupabaseClientWithCapture([
+      { data: baseSubject() },
+      { data: { id: newFileId } },
+      { data: makeSubjectDocumentRow({ file_id: newFileId }) },
+    ]);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx());
+
+    const docInsertArgs = callArgsOf(stubs[2], 'insert') as Record<string, unknown>;
+    expect(docInsertArgs).toMatchObject({ document_type: null });
+  });
+
+  it('throws DatabaseError when the storage upload itself fails, without attempting any cleanup (no files row was created yet at this point)', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const client = makeSupabaseClientWithStorage([{ data: baseSubject() }], {
+      upload: vi.fn().mockResolvedValue({ data: null, error: { message: 'storage down' } }),
+    });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await expect(
+      SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx()),
+    ).rejects.toThrow('Document upload failed');
+  });
+
+  it('throws DatabaseError when the files metadata insert fails — the storage object is left behind, uncleaned (pre-existing gap, characterized not fixed)', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const uploadSpy = vi.fn().mockResolvedValue({ data: {}, error: null });
+    const client = makeSupabaseClientWithStorage(
+      [{ data: baseSubject() }, { data: null, error: { message: 'insert failed' } }],
+      { upload: uploadSpy },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await expect(
+      SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx()),
+    ).rejects.toThrow(DatabaseError);
+    // No .remove() call exists anywhere in this path — nothing to assert
+    // being called; the absence itself is the characterized behavior.
+    expect(uploadSpy).toHaveBeenCalled();
+  });
+
+  it('throws DatabaseError when the subject_documents insert fails after a successful files insert — both the storage object AND the files row are left orphaned (pre-existing gap, characterized not fixed)', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const newFileId = 'new-file-uuid';
+    const client = makeSupabaseClientWithStorage([
+      { data: baseSubject() },
+      { data: { id: newFileId } }, // files insert succeeds
+      { data: null, error: { message: 'link insert failed' } }, // subject_documents insert fails
+    ]);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await expect(
+      SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx()),
+    ).rejects.toThrow('link insert failed');
+  });
+
+  it('never returns a public or signed URL — this path has no URL-issuing capability at all today', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'new-file-uuid';
+    const client = makeSupabaseClientWithStorage([
+      { data: baseSubject() },
+      { data: { id: newFileId } },
+      { data: makeSubjectDocumentRow({ file_id: newFileId }) },
+    ]);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await SubjectService.uploadDocument(
+      SUBJECT_ID,
+      makeFile('consent.pdf', 'content'),
+      makeCtx(),
+    );
+
+    expect(result).not.toHaveProperty('url');
+    expect(result).not.toHaveProperty('signedUrl');
+    expect(result).not.toHaveProperty('publicUrl');
+  });
+});
+
+// ── Sub-Milestone 3.3B: Document Center retrofit for uploadDocument() ──────
+//
+// Subjects uses a multi-attachment model (see the 3.3A audit): every
+// subject_documents row is its own independent logical document, so
+// record_id is the individual subject_documents row's id, NOT subject_id —
+// unlike Regulatory/Staff Credentials' one-slot-per-scope model. Only
+// linkForModule is ever used here; there is no replace/relink concept.
+
+describe('SubjectService.uploadDocument — Document Center retrofit', () => {
+  function baseSubject(overrides: Record<string, unknown> = {}) {
+    return {
+      id: SUBJECT_ID,
+      company_id: COMPANY_ID,
+      site_id: SITE_ID,
+      study_id: STUDY_ID,
+      subject_number: '001-001',
+      initials: 'A.B.',
+      status: 'active',
+      screening_date: null,
+      baseline_date: null,
+      randomization_date: null,
+      randomization_number: null,
+      end_of_study_date: null,
+      created_by: USER_ID,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  function makeSubjectDocumentRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'subject-doc-uuid',
+      company_id: COMPANY_ID,
+      subject_id: SUBJECT_ID,
+      file_id: 'file-uuid',
+      document_type: null,
+      uploaded_by: USER_ID,
+      uploaded_at: new Date().toISOString(),
+      notes: null,
+      ...overrides,
+    };
+  }
+
+  function makeSupabaseClientWithStorage(
+    responses: Array<{ data: unknown; error?: unknown }>,
+    storage?: { upload?: unknown },
+  ) {
+    const from = vi.fn();
+    for (const r of responses) {
+      from.mockReturnValueOnce(queryStub(r.data, r.error ?? null));
+    }
+    const storageBucket = {
+      upload: storage?.upload ?? vi.fn().mockResolvedValue({ data: {}, error: null }),
+    };
+    return { from, storage: { from: vi.fn().mockReturnValue(storageBucket) } } as never;
+  }
+
+  function makeFile(name: string, content: string, type = 'application/pdf'): File {
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(content);
+    return {
+      name,
+      type,
+      size: bytes.byteLength,
+      arrayBuffer: async () => bytes.buffer,
+    } as unknown as File;
+  }
+
+  function successClient(subjectDocId: string, newFileId: string) {
+    return makeSupabaseClientWithStorage([
+      { data: baseSubject() }, // getById
+      { data: { id: newFileId } }, // files insert
+      { data: makeSubjectDocumentRow({ id: subjectDocId, file_id: newFileId }) }, // subject_documents insert
+    ]);
+  }
+
+  it('A/C: calls linkForModule exactly once, with module=subject_documents', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const linkSpy = vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'new-file-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient('subject-doc-uuid', newFileId),
+    );
+
+    await SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx());
+
+    expect(linkSpy).toHaveBeenCalledTimes(1);
+    expect(linkSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ module: 'subject_documents' }),
+      expect.anything(),
+    );
+  });
+
+  it('B: passes the exact fileId returned by the upload flow — never a reconstructed identifier', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const linkSpy = vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'distinct-file-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient('subject-doc-uuid', newFileId),
+    );
+
+    await SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx());
+
+    const callArgs = linkSpy.mock.calls[0]?.[0];
+    expect(callArgs?.file_id).toBe(newFileId);
+  });
+
+  it('D/E: passes subjectDocument.id as record_id — never subject_id', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const linkSpy = vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'new-file-uuid';
+    const subjectDocId = 'distinct-subject-doc-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(successClient(subjectDocId, newFileId));
+
+    await SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx());
+
+    const callArgs = linkSpy.mock.calls[0]?.[0];
+    expect(callArgs?.record_id).toBe(subjectDocId);
+    expect(callArgs?.record_id).not.toBe(SUBJECT_ID);
+  });
+
+  it('F: passes the authoritative subject.site_id obtained via getById()', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const linkSpy = vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'new-file-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient('subject-doc-uuid', newFileId),
+    );
+
+    await SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx());
+
+    expect(linkSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ site_id: SITE_ID }),
+      expect.anything(),
+    );
+  });
+
+  it('G/H: linkForModule is called only after the subject_documents insert and the existing AuditService.log call have both already succeeded', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const callOrder: string[] = [];
+    vi.mocked(AuditService.log).mockImplementation(async () => {
+      callOrder.push('audit');
+    });
+    vi.spyOn(FileService, 'linkForModule').mockImplementation(async () => {
+      callOrder.push('link');
+      return {} as FileLink;
+    });
+    const newFileId = 'new-file-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient('subject-doc-uuid', newFileId),
+    );
+
+    await SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx());
+
+    expect(callOrder).toEqual(['audit', 'link']);
+  });
+
+  it('I: still succeeds and returns the finalized document when linkForModule fails (failure is logged, not swallowed silently, and never rolled back)', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'linkForModule').mockRejectedValue(new Error('file_links insert failed'));
+    const newFileId = 'new-file-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient('subject-doc-uuid', newFileId),
+    );
+
+    const result = await SubjectService.uploadDocument(
+      SUBJECT_ID,
+      makeFile('consent.pdf', 'content'),
+      makeCtx(),
+    );
+
+    expect(result.file_id).toBe(newFileId);
+    expect(result.subject_id).toBe(SUBJECT_ID);
+  });
+
+  it('J: the return shape is unchanged — still the plain SubjectDocument row', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const newFileId = 'new-file-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient('subject-doc-uuid', newFileId),
+    );
+
+    const result = await SubjectService.uploadDocument(
+      SUBJECT_ID,
+      makeFile('consent.pdf', 'content'),
+      makeCtx(),
+    );
+
+    expect(Object.keys(result).sort()).toEqual(
+      [
+        'id',
+        'company_id',
+        'subject_id',
+        'file_id',
+        'document_type',
+        'uploaded_by',
+        'uploaded_at',
+        'notes',
+      ].sort(),
+    );
+  });
+
+  it('K: never exposes a public URL from the Document Center link', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(FileService, 'linkForModule').mockResolvedValue({
+      id: 'link-uuid',
+      company_id: COMPANY_ID,
+      file_id: 'new-file-uuid',
+      site_id: SITE_ID,
+      module: 'subject_documents',
+      record_id: 'subject-doc-uuid',
+      created_by: USER_ID,
+      created_at: new Date().toISOString(),
+    } as FileLink);
+    const newFileId = 'new-file-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient('subject-doc-uuid', newFileId),
+    );
+
+    const result = await SubjectService.uploadDocument(
+      SUBJECT_ID,
+      makeFile('consent.pdf', 'content'),
+      makeCtx(),
+    );
+
+    expect(result).not.toHaveProperty('url');
+    expect(result).not.toHaveProperty('signedUrl');
+    expect(result).not.toHaveProperty('publicUrl');
+  });
+
+  it('L: existing permission enforcement (edit_subject) is unaffected by the retrofit', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('edit_subject'),
+    );
+
+    await expect(
+      SubjectService.uploadDocument(SUBJECT_ID, makeFile('consent.pdf', 'content'), makeCtx()),
+    ).rejects.toThrow(PermissionDeniedError);
+  });
+
+  it('multi-attachment: two uploads for the same subject produce two independent subject_documents rows, each with its own linkForModule call — no relink, no replacement', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const linkSpy = vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const relinkSpy = vi.spyOn(FileService, 'relinkForModule');
+
+    // uploadDocument() calls createServerSupabaseClient() TWICE per
+    // invocation (once inside getById(), once in its own body) — the same
+    // client (and its single 3-deep `from` queue) must satisfy both calls,
+    // exactly like every other test in this file. mockResolvedValue
+    // (persistent, not Once) is therefore set once per upload, not once
+    // per internal call.
+    const fileIdA = 'file-a-uuid';
+    const subjectDocIdA = 'subject-doc-a-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(successClient(subjectDocIdA, fileIdA));
+    const docA = await SubjectService.uploadDocument(
+      SUBJECT_ID,
+      makeFile('consent.pdf', 'content A'),
+      makeCtx(),
+      'consent_form',
+    );
+
+    const fileIdB = 'file-b-uuid';
+    const subjectDocIdB = 'subject-doc-b-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(successClient(subjectDocIdB, fileIdB));
+    const docB = await SubjectService.uploadDocument(
+      SUBJECT_ID,
+      makeFile('lab-report.pdf', 'content B'),
+      makeCtx(),
+      'lab_report',
+    );
+
+    // Same subject, different logical documents.
+    expect(docA.subject_id).toBe(SUBJECT_ID);
+    expect(docB.subject_id).toBe(SUBJECT_ID);
+    expect(docA.id).not.toBe(docB.id);
+    expect(docA.file_id).not.toBe(docB.file_id);
+
+    // Two independent linkForModule calls, each with its own record_id/file_id.
+    expect(linkSpy).toHaveBeenCalledTimes(2);
+    expect(linkSpy).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        file_id: fileIdA,
+        module: 'subject_documents',
+        record_id: subjectDocIdA,
+        site_id: SITE_ID,
+      }),
+      expect.anything(),
+    );
+    expect(linkSpy).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        file_id: fileIdB,
+        module: 'subject_documents',
+        record_id: subjectDocIdB,
+        site_id: SITE_ID,
+      }),
+      expect.anything(),
+    );
+
+    // No relink/replace semantics apply to this module.
+    expect(relinkSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('SubjectService.listDocuments — baseline characterization', () => {
+  it('throws PermissionDeniedError without view_subjects', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('view_subjects'),
+    );
+
+    await expect(SubjectService.listDocuments(SUBJECT_ID, makeCtx())).rejects.toThrow(
+      PermissionDeniedError,
+    );
+  });
+
+  it('throws NotFoundError for a subject belonging to a different company', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: null, error: { message: 'no rows' } }),
+    );
+
+    await expect(SubjectService.listDocuments(SUBJECT_ID, makeCtx())).rejects.toThrow(
+      NotFoundError,
+    );
+  });
+
+  it("returns every document row for the subject, scoped to the caller's company", async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const subjectRow = {
+      id: SUBJECT_ID,
+      company_id: COMPANY_ID,
+      site_id: SITE_ID,
+      study_id: STUDY_ID,
+      subject_number: '001-001',
+      status: 'active',
+    };
+    const docs = [
+      { id: 'doc-1', company_id: COMPANY_ID, subject_id: SUBJECT_ID, file_id: 'file-1' },
+      { id: 'doc-2', company_id: COMPANY_ID, subject_id: SUBJECT_ID, file_id: 'file-2' },
+    ];
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: subjectRow }, { data: docs }),
+    );
+
+    const result = await SubjectService.listDocuments(SUBJECT_ID, makeCtx());
+    expect(result).toHaveLength(2);
+  });
+
+  it('returns an empty array when the subject has no documents', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const subjectRow = {
+      id: SUBJECT_ID,
+      company_id: COMPANY_ID,
+      site_id: SITE_ID,
+      study_id: STUDY_ID,
+      subject_number: '001-001',
+      status: 'active',
+    };
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: subjectRow }, { data: [] }),
+    );
+
+    const result = await SubjectService.listDocuments(SUBJECT_ID, makeCtx());
     expect(result).toEqual([]);
   });
 });
