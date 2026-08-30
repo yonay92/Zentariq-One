@@ -2,7 +2,9 @@ import { createHash, randomUUID } from 'crypto';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
+import { FileService } from '@/services/files/FileService';
 import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
+import { logger } from '@/lib/logger';
 import { computeSlotStatus } from '@/services/regulatory/RegulatoryDocumentService';
 import type {
   StaffDocument,
@@ -93,6 +95,67 @@ async function uploadFile(
   }
 
   return { fileId: (fileRow as { id: string }).id, checksum };
+}
+
+// Best-effort Document Center visibility — never blocks the primary Staff
+// Credentials write. Same failure semantics as
+// RegulatoryDocumentService.linkToDocumentCenter/relinkDocumentCenter (see
+// those functions' comments for the full rationale): a failure here means
+// the credential remains fully usable through Staff Credentials as before,
+// just not (yet) visible in the Document Center; recoverable via the
+// Sub-Milestone 3.5 backfill, never a partial/broken Staff Credentials
+// state.
+async function linkToDocumentCenter(
+  fileId: string,
+  staffDocument: StaffDocument,
+  ctx: RequestContext,
+): Promise<void> {
+  try {
+    await FileService.linkForModule(
+      {
+        file_id: fileId,
+        module: 'staff_documents',
+        record_id: staffDocument.id,
+        site_id: staffDocument.site_id,
+      },
+      ctx,
+    );
+  } catch (err) {
+    logger.error('StaffCredentialService: linkForModule failed', {
+      staff_document_id: staffDocument.id,
+      file_id: fileId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+// Best-effort Document Center relink — called ONLY after replace()'s own
+// Staff Credentials writes (supersede previous version, insert new version,
+// update the slot, history, audit) have already succeeded. Same failure
+// semantics as linkToDocumentCenter above and
+// RegulatoryDocumentService.relinkDocumentCenter.
+async function relinkDocumentCenter(
+  fileId: string,
+  staffDocument: StaffDocument,
+  ctx: RequestContext,
+): Promise<void> {
+  try {
+    await FileService.relinkForModule(
+      {
+        file_id: fileId,
+        module: 'staff_documents',
+        record_id: staffDocument.id,
+        site_id: staffDocument.site_id,
+      },
+      ctx,
+    );
+  } catch (err) {
+    logger.error('StaffCredentialService: relinkForModule failed', {
+      staff_document_id: staffDocument.id,
+      file_id: fileId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function writeHistory(
@@ -221,6 +284,8 @@ export const StaffCredentialService = {
       new_value: { document_type_id: staffDocument.document_type_id, user_id: input.user_id },
     });
 
+    await linkToDocumentCenter(fileId, staffDocument, ctx);
+
     return updated as StaffDocument;
   },
 
@@ -348,6 +413,8 @@ export const StaffCredentialService = {
       old_value: { superseded_version: previousVersion.version },
       new_value: { new_version: nextVersionLabel, replacement_reason: input.replacement_reason },
     });
+
+    await relinkDocumentCenter(fileId, staffDocument, ctx);
 
     return updated as StaffDocument;
   },
