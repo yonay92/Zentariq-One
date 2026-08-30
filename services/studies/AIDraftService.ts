@@ -2,6 +2,7 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { VisitTemplateService } from '@/services/visit-templates/VisitTemplateService';
+import { FileService } from '@/services/files/FileService';
 import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 import type { StudyDraft, Study } from '@/types/studies';
@@ -13,6 +14,40 @@ const DRAFT_COLUMNS =
 
 const STUDY_COLUMNS =
   'id, company_id, study_name, protocol_number, sponsor, cro, phase, therapeutic_area, indication, estimated_enrollment, study_duration, study_design, primary_endpoint, status, start_date, end_date, protocol_version, ai_generated, created_by, created_at, updated_at';
+
+// Best-effort Document Center visibility — never blocks the primary
+// finalize write. Same failure semantics as
+// StudyService.linkToDocumentCenter (see its comment for the full
+// rationale). Deliberately NOT called from createDraft(): study_drafts is
+// an intermediate AI/workflow artifact, not part of the canonical Document
+// Center, and can be hard-deleted via deleteDraft() with no cascade into
+// file_links — linking it would risk a permanently orphaned association.
+// The canonical association is created here, exactly once, using the
+// study_documents row this same call just inserted — never the
+// study_drafts row.
+async function linkToDocumentCenter(
+  fileId: string,
+  studyDocumentId: string,
+  ctx: RequestContext,
+): Promise<void> {
+  try {
+    await FileService.linkForModule(
+      {
+        file_id: fileId,
+        module: 'study_documents',
+        record_id: studyDocumentId,
+        site_id: null,
+      },
+      ctx,
+    );
+  } catch (err) {
+    logger.error('AIDraftService: linkForModule failed', {
+      study_document_id: studyDocumentId,
+      file_id: fileId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 export const AIDraftService = {
   async createDraft(file: File, ctx: RequestContext): Promise<StudyDraft> {
@@ -177,14 +212,24 @@ export const AIDraftService = {
       );
     }
 
-    await supabase.from('study_documents').insert({
-      company_id: ctx.company.id,
-      study_id: study.id,
-      file_id: draft.file_id,
-      document_type: 'protocol',
-      uploaded_by: ctx.user.id,
-      ai_processed: true,
-    });
+    const { data: studyDocumentRow, error: studyDocumentError } = await supabase
+      .from('study_documents')
+      .insert({
+        company_id: ctx.company.id,
+        study_id: study.id,
+        file_id: draft.file_id,
+        document_type: 'protocol',
+        uploaded_by: ctx.user.id,
+        ai_processed: true,
+      })
+      .select('id')
+      .single();
+
+    if (studyDocumentError || !studyDocumentRow) {
+      throw new DatabaseError(studyDocumentError?.message ?? 'Failed to record protocol document');
+    }
+
+    const studyDocumentId = (studyDocumentRow as { id: string }).id;
 
     await supabase
       .from('study_drafts')
@@ -201,6 +246,8 @@ export const AIDraftService = {
       record_id: study.id,
       new_value: { draft_id: draftId, visit_count: visit_template_items?.length ?? 0 },
     });
+
+    await linkToDocumentCenter(draft.file_id, studyDocumentId, ctx);
 
     return study;
   },

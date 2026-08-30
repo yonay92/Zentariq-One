@@ -4,6 +4,7 @@ import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { NotificationService } from '@/services/notifications/NotificationService';
 import { VisitTemplateService } from '@/services/visit-templates/VisitTemplateService';
+import { FileService } from '@/services/files/FileService';
 import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 import type {
@@ -63,6 +64,42 @@ export type StudyListFilters = {
 };
 
 export type UpdateStudyServiceInput = UpdateStudyInput & { site_ids?: string[] };
+
+// Best-effort Document Center visibility — never blocks the primary Study
+// document write. Same failure semantics as the Regulatory/Staff
+// Credentials/Subjects retrofits (see e.g.
+// RegulatoryDocumentService.linkToDocumentCenter for the full rationale).
+// study_documents is a flat, multi-attachment table with no slot/version
+// concept — every row (initial protocol, each amendment, or any other
+// document_type) is its own independent logical document, so record_id is
+// the individual study_documents row's id, never study_id. studies has no
+// site_id column at all (sites are many-to-many via study_sites), so
+// site_id is always null here — there is no single authoritative site to
+// attribute a Study-level document to. Only linkForModule is ever used;
+// there is no replace/relink concept for Study documents.
+async function linkToDocumentCenter(
+  fileId: string,
+  studyDocumentId: string,
+  ctx: RequestContext,
+): Promise<void> {
+  try {
+    await FileService.linkForModule(
+      {
+        file_id: fileId,
+        module: 'study_documents',
+        record_id: studyDocumentId,
+        site_id: null,
+      },
+      ctx,
+    );
+  } catch (err) {
+    logger.error('StudyService: linkForModule failed', {
+      study_document_id: studyDocumentId,
+      file_id: fileId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 export const StudyService = {
   async list(filters: StudyListFilters, ctx: RequestContext): Promise<Study[]> {
@@ -200,20 +237,32 @@ export const StudyService = {
       throw new DatabaseError(fileError?.message ?? 'Failed to record uploaded file');
     }
 
-    await supabase.from('study_documents').insert({
-      company_id: ctx.company.id,
-      study_id: studyId,
-      file_id: (fileRow as FileRecord).id,
-      document_type: 'protocol',
-      uploaded_by: ctx.user.id,
-    });
+    const fileId = (fileRow as FileRecord).id;
+
+    const { data: studyDocumentRow, error: studyDocumentError } = await supabase
+      .from('study_documents')
+      .insert({
+        company_id: ctx.company.id,
+        study_id: studyId,
+        file_id: fileId,
+        document_type: 'protocol',
+        uploaded_by: ctx.user.id,
+      })
+      .select('id')
+      .single();
+
+    if (studyDocumentError || !studyDocumentRow) {
+      throw new DatabaseError(studyDocumentError?.message ?? 'Failed to record protocol document');
+    }
+
+    const studyDocumentId = (studyDocumentRow as { id: string }).id;
 
     const isAmendment = study.status === 'active';
 
     let extractionId: string | null = null;
     try {
       const { data: fnData, error: fnError } = await supabase.functions.invoke('protocol-ai', {
-        body: { file_id: (fileRow as FileRecord).id, study_id: studyId },
+        body: { file_id: fileId, study_id: studyId },
       });
       if (fnError) {
         logger.error('protocol-ai invocation failed', { error: fnError.message, studyId });
@@ -254,6 +303,8 @@ export const StudyService = {
       record_id: studyId,
       new_value: { file_name: file.name, extraction_id: extractionId },
     });
+
+    await linkToDocumentCenter(fileId, studyDocumentId, ctx);
 
     return { file: fileRow as FileRecord, extraction_id: extractionId };
   },

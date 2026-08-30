@@ -4,7 +4,9 @@ import { AIDraftService } from '@/services/studies/AIDraftService';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { VisitTemplateService } from '@/services/visit-templates/VisitTemplateService';
 import { AuditService } from '@/services/audit/AuditService';
+import { FileService } from '@/services/files/FileService';
 import { PermissionDeniedError, NotFoundError, BusinessRuleError } from '@/lib/api/errors';
+import type { FileLink } from '@/types/files';
 
 vi.mock('@/services/audit/AuditService', () => ({
   AuditService: { log: vi.fn() },
@@ -21,6 +23,7 @@ const USER_ID = 'user-uuid';
 const DRAFT_ID = 'draft-uuid';
 const FILE_ID = 'file-uuid';
 const STUDY_ID = 'study-uuid';
+const STUDY_DOCUMENT_ID = 'study-document-uuid';
 
 function makeCtx() {
   return {
@@ -193,6 +196,43 @@ describe('AIDraftService.createDraft', () => {
     expect(result.status).toBe('failed');
     expect(result.error_message).toBe('boom');
   });
+
+  it('does NOT create any Document Center association — study_drafts is an intermediate artifact, not part of the canonical Document Center', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const linkSpy = vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const relinkSpy = vi.spyOn(FileService, 'relinkForModule');
+
+    const fileRow = { id: FILE_ID };
+    const draftRowProcessing = {
+      id: DRAFT_ID,
+      company_id: COMPANY_ID,
+      file_id: FILE_ID,
+      status: 'processing',
+      confidence: null,
+      uncertain_fields: [],
+      extracted_profile: {},
+      extracted_visit_items: [],
+      extracted_extra: {},
+      error_message: null,
+      study_id: null,
+      created_by: USER_ID,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const draftRowReady = { ...draftRowProcessing, status: 'ready', confidence: 0.9 };
+
+    const client = makeClient([
+      { data: fileRow },
+      { data: draftRowProcessing },
+      { data: draftRowReady },
+    ]);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await AIDraftService.createDraft(makeFile(), makeCtx());
+
+    expect(linkSpy).not.toHaveBeenCalled();
+    expect(relinkSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe('AIDraftService.getDraft', () => {
@@ -261,6 +301,7 @@ describe('AIDraftService.finalizeDraft', () => {
   it('creates the study, visit template, and protocol document, then marks the draft finalized', async () => {
     vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
     vi.mocked(VisitTemplateService.createTemplate).mockResolvedValue({} as never);
+    vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
 
     const studyRow = {
       id: STUDY_ID,
@@ -272,7 +313,7 @@ describe('AIDraftService.finalizeDraft', () => {
     const client = makeClient([
       { data: readyDraft() }, // getDraft()
       { data: studyRow }, // studies insert
-      { data: null }, // study_documents insert
+      { data: { id: STUDY_DOCUMENT_ID } }, // study_documents insert — now captured via .select('id').single()
       { data: null }, // study_drafts update -> finalized
     ]);
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
@@ -296,6 +337,196 @@ describe('AIDraftService.finalizeDraft', () => {
     expect(AuditService.log).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'study.ai_draft_finalized', record_id: STUDY_ID }),
     );
+  });
+
+  // Sub-Milestone 3.4: this is the exact call site the Document Center
+  // retrofit depends on. Locks down: the file_id used is the draft's own
+  // file_id (the SAME physical file uploaded at createDraft() time, never
+  // re-uploaded or reconstructed), study_id is the newly-created study's
+  // id, and (as of 3.4B) the insert result is now captured via
+  // .select('id').single() rather than discarded.
+  it('inserts the study_documents row with the draft’s own file_id and the newly-created study’s id — the exact identifiers the Document Center retrofit must reuse', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(VisitTemplateService.createTemplate).mockResolvedValue({} as never);
+    vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+
+    const studyRow = {
+      id: STUDY_ID,
+      company_id: COMPANY_ID,
+      study_name: 'Study A',
+      status: 'draft',
+    };
+    const draftFileId = 'distinct-draft-file-uuid';
+
+    const stubs = [
+      queryStub(readyDraft({ file_id: draftFileId })), // getDraft()
+      queryStub(studyRow), // studies insert
+      queryStub({ id: STUDY_DOCUMENT_ID }), // study_documents insert
+      queryStub(null), // study_drafts update -> finalized
+    ];
+    const from = vi.fn();
+    for (const stub of stubs) from.mockReturnValueOnce(stub);
+    const client = {
+      from,
+      storage: { from: vi.fn().mockReturnValue({ upload: vi.fn() }) },
+      functions: { invoke: vi.fn() },
+    } as never;
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await AIDraftService.finalizeDraft(DRAFT_ID, { study_name: 'Study A' }, makeCtx());
+
+    const docInsertStub = stubs[2] as unknown as { insert: ReturnType<typeof vi.fn> };
+    expect(docInsertStub.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        company_id: COMPANY_ID,
+        study_id: STUDY_ID,
+        file_id: draftFileId,
+        document_type: 'protocol',
+        ai_processed: true,
+      }),
+    );
+  });
+});
+
+// ── Sub-Milestone 3.4B: Document Center retrofit for finalizeDraft() ───────
+
+describe('AIDraftService.finalizeDraft — Document Center retrofit', () => {
+  function readyDraft(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      id: DRAFT_ID,
+      company_id: COMPANY_ID,
+      file_id: FILE_ID,
+      status: 'ready',
+      confidence: 0.9,
+      uncertain_fields: [],
+      extracted_profile: {},
+      extracted_visit_items: [],
+      extracted_extra: {},
+      error_message: null,
+      study_id: null,
+      created_by: USER_ID,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  function successClient(fileId: string, studyDocumentId: string) {
+    return makeClient([
+      { data: readyDraft({ file_id: fileId }) }, // getDraft()
+      { data: { id: STUDY_ID, company_id: COMPANY_ID, study_name: 'Study A', status: 'draft' } }, // studies insert
+      { data: { id: studyDocumentId } }, // study_documents insert
+      { data: null }, // study_drafts update -> finalized
+    ]);
+  }
+
+  beforeEach(() => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+  });
+
+  it('calls linkForModule exactly once, with the correct module, the exact inserted study_documents.id as record_id, site_id null', async () => {
+    const linkSpy = vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient(FILE_ID, STUDY_DOCUMENT_ID),
+    );
+
+    await AIDraftService.finalizeDraft(DRAFT_ID, { study_name: 'Study A' }, makeCtx());
+
+    expect(linkSpy).toHaveBeenCalledTimes(1);
+    expect(linkSpy).toHaveBeenCalledWith(
+      {
+        file_id: FILE_ID,
+        module: 'study_documents',
+        record_id: STUDY_DOCUMENT_ID,
+        site_id: null,
+      },
+      expect.anything(),
+    );
+  });
+
+  it("passes the draft's own file_id (never a reconstructed identifier) and the exact study_documents.id from .select('id').single() — never the study_drafts row", async () => {
+    const linkSpy = vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const distinctFileId = 'distinct-draft-file-uuid';
+    const distinctDocId = 'distinct-study-document-uuid';
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient(distinctFileId, distinctDocId),
+    );
+
+    await AIDraftService.finalizeDraft(DRAFT_ID, { study_name: 'Study A' }, makeCtx());
+
+    const callArgs = linkSpy.mock.calls[0]?.[0];
+    expect(callArgs?.file_id).toBe(distinctFileId);
+    expect(callArgs?.record_id).toBe(distinctDocId);
+    expect(callArgs?.record_id).not.toBe(DRAFT_ID); // never the study_drafts row's own id
+  });
+
+  it('still succeeds and returns the finalized study when linkForModule fails (failure is logged, not swallowed silently, and never rolled back)', async () => {
+    vi.spyOn(FileService, 'linkForModule').mockRejectedValue(new Error('file_links insert failed'));
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient(FILE_ID, STUDY_DOCUMENT_ID),
+    );
+
+    const result = await AIDraftService.finalizeDraft(
+      DRAFT_ID,
+      { study_name: 'Study A' },
+      makeCtx(),
+    );
+
+    expect(result.id).toBe(STUDY_ID);
+  });
+
+  it('never exposes a public URL from the Document Center link', async () => {
+    vi.spyOn(FileService, 'linkForModule').mockResolvedValue({
+      id: 'link-uuid',
+      company_id: COMPANY_ID,
+      file_id: FILE_ID,
+      site_id: null,
+      module: 'study_documents',
+      record_id: STUDY_DOCUMENT_ID,
+      created_by: USER_ID,
+      created_at: new Date().toISOString(),
+    } as FileLink);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient(FILE_ID, STUDY_DOCUMENT_ID),
+    );
+
+    const result = await AIDraftService.finalizeDraft(
+      DRAFT_ID,
+      { study_name: 'Study A' },
+      makeCtx(),
+    );
+
+    expect(result).not.toHaveProperty('url');
+    expect(result).not.toHaveProperty('signedUrl');
+  });
+
+  it('does NOT create a file_link for the source study_drafts record — relinkForModule is never used', async () => {
+    const linkSpy = vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const relinkSpy = vi.spyOn(FileService, 'relinkForModule');
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      successClient(FILE_ID, STUDY_DOCUMENT_ID),
+    );
+
+    await AIDraftService.finalizeDraft(DRAFT_ID, { study_name: 'Study A' }, makeCtx());
+
+    // Only one linkForModule call ever happens, and it targets the
+    // study_documents row — never a second call for study_drafts.
+    expect(linkSpy).toHaveBeenCalledTimes(1);
+    expect(linkSpy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ module: 'study_drafts' }),
+      expect.anything(),
+    );
+    expect(relinkSpy).not.toHaveBeenCalled();
+  });
+
+  it('existing permission enforcement is unaffected by the retrofit', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('create_study'),
+    );
+
+    await expect(
+      AIDraftService.finalizeDraft(DRAFT_ID, { study_name: 'Study A' }, makeCtx()),
+    ).rejects.toThrow(PermissionDeniedError);
   });
 });
 
@@ -359,5 +590,38 @@ describe('AIDraftService.deleteDraft', () => {
     expect(AuditService.log).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'study.ai_draft_discarded', record_id: DRAFT_ID }),
     );
+  });
+
+  it('performs no Document Center operation — no file_link was ever created for a never-finalized draft, so there is nothing to unlink on discard', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const linkSpy = vi.spyOn(FileService, 'linkForModule').mockResolvedValue({} as FileLink);
+    const relinkSpy = vi.spyOn(FileService, 'relinkForModule');
+    const client = makeClient([
+      {
+        data: {
+          id: DRAFT_ID,
+          company_id: COMPANY_ID,
+          file_id: FILE_ID,
+          status: 'ready',
+          confidence: 0.9,
+          uncertain_fields: [],
+          extracted_profile: {},
+          extracted_visit_items: [],
+          extracted_extra: {},
+          error_message: null,
+          study_id: null,
+          created_by: USER_ID,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      },
+      { data: null }, // delete
+    ]);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await AIDraftService.deleteDraft(DRAFT_ID, makeCtx());
+
+    expect(linkSpy).not.toHaveBeenCalled();
+    expect(relinkSpy).not.toHaveBeenCalled();
   });
 });
