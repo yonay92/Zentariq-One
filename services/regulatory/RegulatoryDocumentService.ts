@@ -2,7 +2,9 @@ import { createHash, randomUUID } from 'crypto';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
+import { FileService } from '@/services/files/FileService';
 import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
+import { logger } from '@/lib/logger';
 import type {
   RegulatoryDocument,
   RegulatoryDocumentWithType,
@@ -112,6 +114,39 @@ async function writeHistory(
     changed_by: ctx.user.id,
     reason,
   });
+}
+
+// Best-effort Document Center visibility — never blocks the primary
+// Regulatory write. This matches the method's own existing precedent:
+// every downstream write already here (audit logging, history) has no
+// rollback path if it fails after the core regulatory_documents/
+// document_versions rows are committed — AuditService.log itself already
+// swallows its own failures internally for the same reason. A failure here
+// means the document remains fully usable through Regulatory as before,
+// just not (yet) visible in the Document Center; it's recoverable via the
+// Sub-Milestone 3.5 backfill, never a partial/broken Regulatory state.
+async function linkToDocumentCenter(
+  fileId: string,
+  document: RegulatoryDocument,
+  ctx: RequestContext,
+): Promise<void> {
+  try {
+    await FileService.linkForModule(
+      {
+        file_id: fileId,
+        module: 'regulatory_documents',
+        record_id: document.id,
+        site_id: document.site_id,
+      },
+      ctx,
+    );
+  } catch (err) {
+    logger.error('RegulatoryDocumentService: linkForModule failed', {
+      document_id: document.id,
+      file_id: fileId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function uploadFile(
@@ -288,6 +323,8 @@ export const RegulatoryDocumentService = {
       record_id: document.id,
       new_value: { document_type_id: document.document_type_id, version: 'v1' },
     });
+
+    await linkToDocumentCenter(fileId, updatedSlot as RegulatoryDocument, ctx);
 
     return updatedSlot as RegulatoryDocument;
   },
@@ -485,7 +522,19 @@ export const RegulatoryDocumentService = {
       version: nextVersionLabel,
       file_id: fileId,
       checksum,
-      is_current: false,
+      // The newly-inserted version becomes the active/latest version
+      // immediately, regardless of its (still pending_review) review
+      // status — matching create()'s own is_current: true for a brand-new
+      // document (see that call site above) and StaffCredentialService's
+      // identical replace() method. is_current tracks "which version is
+      // active," not "which version has been approved"; getCurrentVersion()
+      // relies on exactly one row being is_current: true at all times for
+      // approve()/reject()/a subsequent replace() to have anything to act
+      // on. This was previously `false`, which left every replaced document
+      // with zero is_current rows — see migration
+      // 024_regulatory_is_current_repair.sql for the data repair this fix
+      // required.
+      is_current: true,
       status: 'pending_review',
       effective_date: input.effective_date ?? null,
       expiration_date: input.expiration_date ?? null,
