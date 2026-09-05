@@ -4,6 +4,7 @@ import { AuditService } from '@/services/audit/AuditService';
 import { NotificationService } from '@/services/notifications/NotificationService';
 import { VisitService } from '@/services/visits/VisitService';
 import { FileService } from '@/services/files/FileService';
+import { ChartService } from '@/services/charts/ChartService';
 import { getVisitLockStatus, sortVisitsByOrder } from '@/lib/utils/visitSequencing';
 import {
   NotFoundError,
@@ -609,10 +610,13 @@ export const SubjectService = {
 
     const supabase = await createServerSupabaseClient();
 
-    const { error: visitError } = await supabase
+    // Step 1 (sequential, reversible): record where/when the visit actually
+    // happened. Status is deliberately NOT touched here — the visit remains
+    // in_progress until Step 2 below, so a failure here is safe to retry and
+    // never risks the "completed implies chart exists" invariant.
+    const { error: visitFieldsError } = await supabase
       .from('visits')
       .update({
-        status: 'completed',
         scheduled_date: input.baseline_date,
         target_date: input.baseline_date,
         window_start: addDaysToDateString(input.baseline_date, -item.window_before),
@@ -621,7 +625,18 @@ export const SubjectService = {
       .eq('id', baselineVisit.id)
       .eq('company_id', ctx.company.id);
 
-    if (visitError) throw new DatabaseError(visitError.message);
+    if (visitFieldsError) throw new DatabaseError(visitFieldsError.message);
+
+    // Step 2 (atomic — Decision 1): flips status -> completed and creates the
+    // required Chart in a single Postgres transaction (migration 026's
+    // complete_visit_with_chart RPC), guaranteeing no completed visit without
+    // its Chart, including under retry or concurrent completion attempts.
+    const { visit: completedBaselineVisit } = await ChartService.ensureChartForCompletedVisit(
+      baselineVisit.id,
+      subjectId,
+      'completed',
+      ctx,
+    );
 
     await supabase.from('visit_history').insert({
       company_id: ctx.company.id,
@@ -631,11 +646,10 @@ export const SubjectService = {
       changed_by: ctx.user.id,
     });
 
-    await VisitService.upsertCalendarEventForVisit(
-      { ...baselineVisit, target_date: input.baseline_date },
-      ctx,
-      { status: 'completed', target_date: input.baseline_date },
-    );
+    await VisitService.upsertCalendarEventForVisit(completedBaselineVisit, ctx, {
+      status: 'completed',
+      target_date: input.baseline_date,
+    });
 
     const { data: updated, error } = await supabase
       .from('subjects')
@@ -736,17 +750,28 @@ export const SubjectService = {
       (input.scheduled_date < visit.window_start || input.scheduled_date > visit.window_end);
     const finalStatus: VisitStatus = isOutOfWindow ? 'out_of_window' : 'completed';
 
-    const { data: updated, error: updateError } = await supabase
+    // Step 1 (sequential, reversible): record the actual completion date.
+    // Status is deliberately NOT touched here — the visit remains in_progress
+    // until Step 2 below, so a failure here is safe to retry.
+    const { error: dateFieldError } = await supabase
       .from('visits')
-      .update({ status: finalStatus, scheduled_date: input.scheduled_date })
+      .update({ scheduled_date: input.scheduled_date })
       .eq('id', visitId)
-      .eq('company_id', ctx.company.id)
-      .select(VISIT_COLUMNS)
-      .single();
+      .eq('company_id', ctx.company.id);
 
-    if (updateError || !updated) {
-      throw new DatabaseError(updateError?.message ?? 'Failed to complete visit');
-    }
+    if (dateFieldError) throw new DatabaseError(dateFieldError.message);
+
+    // Step 2 (atomic — Decision 1): flips status -> finalStatus (completed OR
+    // out_of_window — both are chart-eligible, per BUSINESS_RULES_05 listing
+    // "Out of Window" as a Chart priority criterion) and creates the required
+    // Chart in a single Postgres transaction, guaranteeing no completed visit
+    // without its Chart, including under retry or concurrent completion.
+    const { visit: updated } = await ChartService.ensureChartForCompletedVisit(
+      visitId,
+      subjectId,
+      finalStatus,
+      ctx,
+    );
 
     await supabase.from('visit_history').insert({
       company_id: ctx.company.id,
@@ -761,7 +786,7 @@ export const SubjectService = {
 
     // calendar_events.status has no out_of_window state — the visit still occurred,
     // so it renders as completed on the Calendar either way (matches classifyVisit).
-    await VisitService.upsertCalendarEventForVisit(updated as Visit, ctx, { status: 'completed' });
+    await VisitService.upsertCalendarEventForVisit(updated, ctx, { status: 'completed' });
 
     await this.addTimelineEvent(
       subjectId,
@@ -800,7 +825,7 @@ export const SubjectService = {
       });
     }
 
-    return updated as Visit;
+    return updated;
   },
 
   async randomize(

@@ -17,6 +17,7 @@ import { SubjectService } from '@/services/subjects/SubjectService';
 import { VisitService } from '@/services/visits/VisitService';
 import { LeadService } from '@/services/recruitment/LeadService';
 import { RegulatoryDocumentService } from '@/services/regulatory/RegulatoryDocumentService';
+import { ChartService } from '@/services/charts/ChartService';
 import { NotFoundError } from '@/lib/api/errors';
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -606,5 +607,60 @@ describe('AIDraftService — company isolation', () => {
     await expect(
       AIDraftService.getDraft('draft-other-company', makeCtx(COMPANY_A)),
     ).rejects.toThrow(NotFoundError);
+  });
+});
+
+// ── ChartService ────────────────────────────────────────────────────────────
+
+describe('ChartService — company isolation', () => {
+  it('getChartByVisitId() scopes query to company_id from context', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const { client, eqCalls } = makeTrackingClient(null);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await ChartService.getChartByVisitId('visit-1', makeCtx(COMPANY_A));
+
+    const companyEq = eqCalls.find(([col]) => col === 'company_id');
+    expect(companyEq).toBeDefined();
+    expect(companyEq![1]).toBe(COMPANY_A);
+  });
+
+  it('getChartById() throws NotFoundError when the chart belongs to a different company', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const { client } = makeTrackingClient(null);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await expect(
+      ChartService.getChartById('chart-other-company', makeCtx(COMPANY_A)),
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it('ensureChartForCompletedVisit() passes the context company_id (not a client-supplied one) to the atomic RPC', async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: {
+        visit: { id: 'visit-1', status: 'completed' },
+        chart_id: 'chart-1',
+        chart_created: true,
+        already_completed: false,
+      },
+      error: null,
+    });
+    const from = vi.fn().mockReturnValue({
+      insert: vi.fn().mockReturnThis(),
+      then: (resolve: (v: unknown) => void) => resolve({ data: null, error: null }),
+    });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue({ from, rpc } as never);
+
+    await ChartService.ensureChartForCompletedVisit(
+      'visit-1',
+      'subject-1',
+      'completed',
+      makeCtx(COMPANY_B),
+    );
+
+    expect(rpc).toHaveBeenCalledWith(
+      'complete_visit_with_chart',
+      expect.objectContaining({ p_company_id: COMPANY_B }),
+    );
   });
 });

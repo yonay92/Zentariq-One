@@ -5,6 +5,7 @@ import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { NotificationService } from '@/services/notifications/NotificationService';
 import { FileService } from '@/services/files/FileService';
+import { ChartService } from '@/services/charts/ChartService';
 import {
   PermissionDeniedError,
   BusinessRuleError,
@@ -84,6 +85,20 @@ function makeSupabaseClient(...responses: Array<{ data: unknown; error?: unknown
     from.mockReturnValueOnce(queryStub(r.data, r.error ?? null));
   }
   return { from } as never;
+}
+
+// completeVisit/completeBaselineVisit delegate the atomic status-flip +
+// chart-creation step to ChartService.ensureChartForCompletedVisit (the
+// migration 026 RPC wrapper) — mocked at that boundary here, the same way
+// PermissionService.requirePermission is mocked rather than re-simulating
+// its underlying .rpc() call. ChartService's own atomicity/idempotency
+// behavior is covered independently in ChartService.test.ts.
+function mockEnsureChart(visit: Record<string, unknown>) {
+  return vi.spyOn(ChartService, 'ensureChartForCompletedVisit').mockResolvedValue({
+    visit: visit as never,
+    chartId: 'chart-uuid',
+    chartCreated: true,
+  });
 }
 
 beforeEach(() => {
@@ -341,12 +356,24 @@ describe('SubjectService.completeBaselineVisit', () => {
       window_end: '2026-02-24',
     };
 
+    mockEnsureChart({
+      ...baselineVisit,
+      status: 'completed',
+      scheduled_date: NEW_BASELINE_DATE,
+      target_date: NEW_BASELINE_DATE,
+      site_id: SITE_ID,
+      company_id: COMPANY_ID,
+      study_id: STUDY_ID,
+      subject_id: SUBJECT_ID,
+      visit_name: 'Baseline',
+    });
+
     const client = makeSupabaseClient(
       { data: subjectRow }, // getById
       { data: { id: 'template-uuid' } }, // visit_templates lookup (getVisitScheduleContext)
       { data: [baselineItem, week4Item] }, // visit_template_items
       { data: [baselineVisit] }, // visits (current, for lock check — Week 4 doesn't exist for this subject's current-visits query used by the lock check)
-      { data: null }, // visits update (mark Baseline completed again)
+      { data: null }, // visits update (Step 1 — date fields only; status flip + chart creation is mocked via ChartService above)
       { data: null }, // visit_history insert
       { data: null }, // calendar_events select (Baseline's own event — existing check)
       { data: null }, // calendar_events insert (self-heal — none existed)
@@ -520,12 +547,24 @@ describe('SubjectService.completeBaselineVisit', () => {
       status: 'in_progress',
     };
 
+    mockEnsureChart({
+      ...baselineVisit,
+      status: 'completed',
+      scheduled_date: BASELINE_DATE,
+      target_date: BASELINE_DATE,
+      site_id: SITE_ID,
+      company_id: COMPANY_ID,
+      study_id: STUDY_ID,
+      subject_id: SUBJECT_ID,
+      visit_name: 'Baseline',
+    });
+
     const client = makeSupabaseClient(
       { data: subjectRow }, // getById
       { data: { id: 'template-uuid' } }, // visit_templates lookup
       { data: [baselineItem] }, // visit_template_items (only item — no predecessors)
       { data: [baselineVisit] }, // visits (subject's current visits)
-      { data: null }, // visits update (mark completed)
+      { data: null }, // visits update (Step 1 — date fields only; status flip + chart creation is mocked via ChartService above)
       { data: null }, // visit_history insert
       { data: null }, // calendar_events select (existing check)
       { data: null }, // calendar_events insert (self-heal — none existed)
@@ -806,13 +845,15 @@ describe('SubjectService.completeVisit', () => {
       scheduled_date: COMPLETE_INPUT.scheduled_date,
     };
 
+    mockEnsureChart(completedVisit);
+
     const client = makeSupabaseClient(
       { data: makeSubjectRow() }, // getById
       { data: week4Visit }, // visits select (target visit)
       { data: { id: 'template-uuid' } }, // visit_templates lookup
       { data: [week4Item] }, // visit_template_items (no predecessors)
       { data: [week4Visit] }, // visits (all)
-      { data: completedVisit }, // visits update
+      { data: null }, // visits update (Step 1 — date field only; status flip + chart creation is mocked via ChartService above)
       { data: null }, // visit_history insert
       { data: null }, // calendar_events select (existing check)
       { data: null }, // calendar_events insert (self-heal — none existed)
@@ -830,6 +871,14 @@ describe('SubjectService.completeVisit', () => {
     expect(result.status).toBe('completed');
     expect(AuditService.log).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'visit.completed', record_id: VISIT_ID }),
+    );
+    // Decision 1: the visit's terminal status transition is delegated to the
+    // atomic complete_visit_with_chart RPC wrapper, not a plain visits update.
+    expect(ChartService.ensureChartForCompletedVisit).toHaveBeenCalledWith(
+      VISIT_ID,
+      SUBJECT_ID,
+      'completed',
+      expect.anything(),
     );
   });
 
@@ -862,6 +911,7 @@ describe('SubjectService.completeVisit', () => {
       const finalStatus =
         scheduledDate < WINDOW_START || scheduledDate > WINDOW_END ? 'out_of_window' : 'completed';
       const completedVisit = { ...visit, status: finalStatus, scheduled_date: scheduledDate };
+      mockEnsureChart(completedVisit);
 
       const client = makeSupabaseClient(
         { data: makeSubjectRow() }, // getById
@@ -869,7 +919,7 @@ describe('SubjectService.completeVisit', () => {
         { data: { id: 'template-uuid' } }, // visit_templates lookup
         { data: [item] }, // visit_template_items (no predecessors)
         { data: [visit] }, // visits (all)
-        { data: completedVisit }, // visits update
+        { data: null }, // visits update (Step 1 — date field only; status flip + chart creation is mocked via ChartService above)
         { data: null }, // visit_history insert
         { data: null }, // calendar_events select (existing check)
         { data: null }, // calendar_events insert (self-heal — none existed)
@@ -938,6 +988,15 @@ describe('SubjectService.completeVisit', () => {
           recipientRole: 'crc',
           relatedRecordId: VISIT_ID,
         }),
+      );
+      // Out-of-window visits are chart-eligible too (BUSINESS_RULES_05 lists
+      // "Out of Window" as a Chart priority criterion) — the atomic RPC
+      // wrapper is called with 'out_of_window', not skipped.
+      expect(ChartService.ensureChartForCompletedVisit).toHaveBeenCalledWith(
+        VISIT_ID,
+        SUBJECT_ID,
+        'out_of_window',
+        expect.anything(),
       );
     });
 

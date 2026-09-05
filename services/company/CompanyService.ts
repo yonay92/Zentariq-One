@@ -179,6 +179,7 @@ export const CompanyService = {
       'override_regulatory_status',
       'override_do_not_contact',
       'reopen_recruitment_tasks',
+      'reopen_chart',
     ]);
     const adminPerms = Array.from(permMap.entries())
       .filter(([key]) => !ADMIN_EXCLUDED_PERMISSIONS.has(key))
