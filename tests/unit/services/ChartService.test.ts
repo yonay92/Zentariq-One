@@ -75,6 +75,13 @@ function queryStub(data: unknown, error: unknown = null) {
   const stub: Record<string, unknown> = {
     select: vi.fn().mockReturnThis(),
     eq: vi.fn().mockReturnThis(),
+    // Milestone 4.1 listCharts' batched enrichment queries (visits/subjects/
+    // studies/sites) filter with .in(...) — chainable like eq, resolves via
+    // the same thenable as the rest of this stub.
+    in: vi.fn().mockReturnThis(),
+    // getChartHistory orders by changed_at — chainable, terminal via the
+    // same thenable as the rest of this stub.
+    order: vi.fn().mockReturnThis(),
     insert: vi.fn().mockReturnThis(),
     update: vi.fn().mockReturnThis(),
     maybeSingle: vi.fn().mockResolvedValue({ data, error }),
@@ -83,7 +90,7 @@ function queryStub(data: unknown, error: unknown = null) {
     catch: resolved.catch.bind(resolved),
     finally: resolved.finally.bind(resolved),
   };
-  for (const key of ['select', 'eq', 'insert', 'update']) {
+  for (const key of ['select', 'eq', 'in', 'order', 'insert', 'update']) {
     (stub[key] as ReturnType<typeof vi.fn>).mockReturnValue(stub);
   }
   return stub;
@@ -514,5 +521,243 @@ describe('ChartService.reopenChart', () => {
         }),
       }),
     );
+  });
+});
+
+// ── getChartHistory (Milestone 4.1 — Chart Detail workspace) ────────────────
+
+describe('ChartService.getChartHistory', () => {
+  it('rejects a caller without view_charts', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('view_charts'),
+    );
+
+    await expect(ChartService.getChartHistory(CHART_ID, makeCtx())).rejects.toThrow(
+      PermissionDeniedError,
+    );
+  });
+
+  it('throws NotFoundError when the chart does not exist / is out of scope', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(makeSupabaseClient({ data: null }));
+
+    await expect(ChartService.getChartHistory(CHART_ID, makeCtx())).rejects.toThrow(NotFoundError);
+  });
+
+  it('returns history rows scoped to the chart and company, most recent first', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const historyRows = [
+      {
+        id: 'h2',
+        company_id: COMPANY_ID,
+        chart_id: CHART_ID,
+        old_status: 'in_progress',
+        new_status: 'entered_in_edc',
+        changed_by: USER_ID,
+        changed_at: '2026-01-05T00:00:00Z',
+        reason: null,
+      },
+      {
+        id: 'h1',
+        company_id: COMPANY_ID,
+        chart_id: CHART_ID,
+        old_status: null,
+        new_status: 'chart_ready',
+        changed_by: USER_ID,
+        changed_at: '2026-01-01T00:00:00Z',
+        reason: null,
+      },
+    ];
+    const client = makeSupabaseClient(
+      { data: makeChart() }, // getChartOrThrow
+      { data: historyRows }, // chart_history select
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await ChartService.getChartHistory(CHART_ID, makeCtx());
+
+    expect(result).toEqual(historyRows);
+    const historyStub = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock
+      .results[1]?.value as { eq: ReturnType<typeof vi.fn> };
+    expect(historyStub.eq).toHaveBeenCalledWith('chart_id', CHART_ID);
+    expect(historyStub.eq).toHaveBeenCalledWith('company_id', COMPANY_ID);
+  });
+});
+
+// ── listCharts (Milestone 4.1 — Chart Queue / Subject Profile Charts tab) ───
+
+function makeVisitRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: VISIT_ID,
+    visit_name: 'Visit 2',
+    target_date: '2026-01-01',
+    scheduled_date: '2026-01-01',
+    status: 'completed',
+    ...overrides,
+  };
+}
+
+describe('ChartService.listCharts', () => {
+  it('rejects a caller without view_charts', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('view_charts'),
+    );
+
+    await expect(ChartService.listCharts({}, makeCtx())).rejects.toThrow(PermissionDeniedError);
+  });
+
+  it('returns an empty, zero-total page without any enrichment queries when no charts match', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const client = makeSupabaseClient({ data: [] });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await ChartService.listCharts({}, makeCtx());
+
+    expect(result).toEqual({ data: [], total: 0, page: 1, page_size: 25 });
+    // Only the base charts query — no visits/subjects/studies/sites lookups.
+    expect((client as unknown as { from: ReturnType<typeof vi.fn> }).from).toHaveBeenCalledTimes(1);
+  });
+
+  it('scopes the base query to company_id plus every supplied filter', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const client = makeSupabaseClient(
+      { data: [] }, // no charts match — short-circuits before enrichment
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await ChartService.listCharts(
+      { site_id: SITE_ID, study_id: STUDY_ID, subject_id: SUBJECT_ID, status: 'chart_ready' },
+      makeCtx(),
+    );
+
+    const chartsStub = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock
+      .results[0]?.value as { eq: ReturnType<typeof vi.fn> };
+    expect(chartsStub.eq).toHaveBeenCalledWith('company_id', COMPANY_ID);
+    expect(chartsStub.eq).toHaveBeenCalledWith('site_id', SITE_ID);
+    expect(chartsStub.eq).toHaveBeenCalledWith('study_id', STUDY_ID);
+    expect(chartsStub.eq).toHaveBeenCalledWith('subject_id', SUBJECT_ID);
+    expect(chartsStub.eq).toHaveBeenCalledWith('status', 'chart_ready');
+  });
+
+  it('never sends priority to the DB query — it is a computed field, filtered after the fact', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const client = makeSupabaseClient({ data: [] });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await ChartService.listCharts({ priority: 'critical' }, makeCtx());
+
+    const chartsStub = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock
+      .results[0]?.value as { eq: ReturnType<typeof vi.fn> };
+    expect(chartsStub.eq).not.toHaveBeenCalledWith('priority', 'critical');
+  });
+
+  it('enriches rows with subject/study/site/visit display fields and computed aging', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const now = new Date('2026-01-10T00:00:00Z');
+    vi.useFakeTimers().setSystemTime(now);
+
+    const chart = makeChart({ chart_ready_date: '2026-01-01T00:00:00Z' });
+    const client = makeSupabaseClient(
+      { data: [chart] }, // charts
+      { data: [makeVisitRow({ status: 'completed' })] }, // visits
+      { data: [{ id: SUBJECT_ID, subject_number: 'S-001' }] }, // subjects
+      { data: [{ id: STUDY_ID, study_name: 'ACME Trial' }] }, // studies
+      { data: [{ id: SITE_ID, name: 'Main Site' }] }, // sites
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await ChartService.listCharts({}, makeCtx());
+
+    expect(result.data).toHaveLength(1);
+    expect(result.data[0]).toMatchObject({
+      subject_number: 'S-001',
+      study_name: 'ACME Trial',
+      site_name: 'Main Site',
+      visit_name: 'Visit 2',
+      is_out_of_window: false,
+      effective_priority: 'critical', // >7 days overdue at 2026-01-10
+    });
+    vi.useRealTimers();
+  });
+
+  it('marks a chart critical when its visit is out_of_window, independent of days pending', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const now = new Date('2026-01-01T12:00:00Z');
+    vi.useFakeTimers().setSystemTime(now);
+
+    const chart = makeChart({ chart_ready_date: '2026-01-01T00:00:00Z' });
+    const client = makeSupabaseClient(
+      { data: [chart] },
+      { data: [makeVisitRow({ status: 'out_of_window' })] },
+      { data: [{ id: SUBJECT_ID, subject_number: 'S-001' }] },
+      { data: [{ id: STUDY_ID, study_name: 'ACME Trial' }] },
+      { data: [{ id: SITE_ID, name: 'Main Site' }] },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await ChartService.listCharts({}, makeCtx());
+
+    expect(result.data[0]).toMatchObject({
+      is_out_of_window: true,
+      effective_priority: 'critical',
+    });
+    vi.useRealTimers();
+  });
+
+  it('filters by the computed priority tier after enrichment', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const now = new Date('2026-01-01T12:00:00Z');
+    vi.useFakeTimers().setSystemTime(now);
+
+    const lowChart = makeChart({ id: 'chart-low', chart_ready_date: '2026-01-01T00:00:00Z' });
+    const criticalChart = makeChart({ id: 'chart-critical', visit_id: 'visit-2' });
+    const client = makeSupabaseClient(
+      { data: [lowChart, criticalChart] },
+      {
+        data: [
+          makeVisitRow({ status: 'completed' }),
+          makeVisitRow({ id: 'visit-2', status: 'out_of_window' }),
+        ],
+      },
+      { data: [{ id: SUBJECT_ID, subject_number: 'S-001' }] },
+      { data: [{ id: STUDY_ID, study_name: 'ACME Trial' }] },
+      { data: [{ id: SITE_ID, name: 'Main Site' }] },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await ChartService.listCharts({ priority: 'critical' }, makeCtx());
+
+    expect(result.data).toHaveLength(1);
+    expect(result.data[0]?.id).toBe('chart-critical');
+    expect(result.total).toBe(1);
+    vi.useRealTimers();
+  });
+
+  it('sorts critical charts before low-priority ones, then paginates', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const now = new Date('2026-01-01T12:00:00Z');
+    vi.useFakeTimers().setSystemTime(now);
+
+    const lowChart = makeChart({ id: 'chart-low', chart_ready_date: '2026-01-01T00:00:00Z' });
+    const criticalChart = makeChart({ id: 'chart-critical', visit_id: 'visit-2' });
+    const client = makeSupabaseClient(
+      { data: [lowChart, criticalChart] },
+      {
+        data: [
+          makeVisitRow({ status: 'completed' }),
+          makeVisitRow({ id: 'visit-2', status: 'out_of_window' }),
+        ],
+      },
+      { data: [{ id: SUBJECT_ID, subject_number: 'S-001' }] },
+      { data: [{ id: STUDY_ID, study_name: 'ACME Trial' }] },
+      { data: [{ id: SITE_ID, name: 'Main Site' }] },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await ChartService.listCharts({ page: 1, page_size: 1 }, makeCtx());
+
+    expect(result.total).toBe(2);
+    expect(result.data).toHaveLength(1);
+    expect(result.data[0]?.id).toBe('chart-critical');
   });
 });

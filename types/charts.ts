@@ -45,3 +45,38 @@ export type ChartAging = {
   days_since_ready: number | null;
   effective_priority: ChartPriority;
 };
+
+// Milestone 4.1 — Chart Queue / Subject Profile Charts tab read filters.
+// priority is applied by ChartService.listCharts AFTER computing ChartAging
+// per row, never as a DB column filter — charts.priority is a stale
+// creation-time default, not the authoritative computed value.
+export type ChartQueueFilters = {
+  site_id?: string | undefined;
+  study_id?: string | undefined;
+  subject_id?: string | undefined;
+  status?: ChartStatus | undefined;
+  priority?: ChartPriority | undefined;
+  page?: number | undefined;
+  page_size?: number | undefined;
+};
+
+// Denormalized display fields resolved by ChartService.listCharts' batched
+// enrichment (same pattern as VisitService.enrichCalendarEvents) — the one
+// authorized read contract shared by the Chart Queue and the Subject
+// Profile Charts tab, never a second independent data-access path.
+export type ChartQueueItem = Chart &
+  ChartAging & {
+    subject_number: string;
+    study_name: string;
+    site_name: string;
+    visit_name: string;
+    visit_date: string | null;
+    is_out_of_window: boolean;
+  };
+
+export type ChartQueueResult = {
+  data: ChartQueueItem[];
+  total: number;
+  page: number;
+  page_size: number;
+};

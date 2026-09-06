@@ -9,12 +9,14 @@ import { SubjectTimeline } from '@/components/subjects/SubjectTimeline';
 import { SubjectNotes } from '@/components/subjects/SubjectNotes';
 import { SubjectDocuments } from '@/components/subjects/SubjectDocuments';
 import { SubjectContactInfo } from '@/components/subjects/SubjectContactInfo';
+import { SubjectChartsTab } from '@/components/subjects/SubjectChartsTab';
 import type { Subject, Visit, SubjectStatusHistory } from '@/types/subjects';
 import type { VisitTemplateItem, VisitTemplateWithItems } from '@/types/studies';
 
 const TABS = [
   'Overview',
   'Visits',
+  'Charts',
   'Timeline',
   'Notes',
   'Documents',
@@ -181,6 +183,7 @@ export default function SubjectProfilePage({ params }: { params: Promise<{ id: s
           onChanged={() => void fetchSubject()}
         />
       )}
+      {tab === 'Charts' && <SubjectChartsTab subjectId={subject.id} />}
       {tab === 'Timeline' && <SubjectTimeline subjectId={subject.id} />}
       {tab === 'Notes' && <SubjectNotes subjectId={subject.id} />}
       {tab === 'Documents' && <SubjectDocuments subjectId={subject.id} />}

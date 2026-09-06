@@ -975,6 +975,35 @@ export const pipelineColumnSchema = z.object({ column: z.enum(PIPELINE_COLUMNS) 
 
 export type PipelineColumnSchema = z.infer<typeof pipelineColumnSchema>;
 
+// ── Charts (Milestone 4.1 — Data Entry UI) ────────────────────────────────────
+
+const CHART_STATUSES = ['chart_ready', 'in_progress', 'entered_in_edc', 'on_hold'] as const;
+const CHART_PRIORITIES = ['critical', 'high', 'medium', 'low'] as const;
+
+export const listChartsSchema = z.object({
+  site_id: z.string().uuid().optional(),
+  study_id: z.string().uuid().optional(),
+  subject_id: z.string().uuid().optional(),
+  status: z.enum(CHART_STATUSES).optional(),
+  priority: z.enum(CHART_PRIORITIES).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  page_size: z.coerce.number().int().min(1).max(100).optional(),
+});
+
+export type ListChartsSchema = z.infer<typeof listChartsSchema>;
+
+export const markChartEnteredSchema = z.object({
+  entered_by_role: z.string().min(1, 'A role is required').max(100).trim(),
+});
+
+export type MarkChartEnteredSchema = z.infer<typeof markChartEnteredSchema>;
+
+export const reopenChartSchema = z.object({
+  reason: z.string().min(1, 'A reason is required'),
+});
+
+export type ReopenChartSchema = z.infer<typeof reopenChartSchema>;
+
 // ── Document Center ───────────────────────────────────────────────────────────
 
 export const linkFileSchema = z.object({

@@ -120,6 +120,20 @@ const NAV_ITEMS: NavItem[] = [
     permission: 'view_visits',
   },
   {
+    label: 'Charts',
+    href: '/charts',
+    icon: (
+      <svg {...ICON_PROPS}>
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M9 12h3.75M9 15.75h3.75M9 8.25h3.75m3 11.25H6.75a1.5 1.5 0 01-1.5-1.5V4.5a1.5 1.5 0 011.5-1.5h5.379a1.5 1.5 0 011.06.44l3.622 3.621a1.5 1.5 0 01.44 1.061V19.5a1.5 1.5 0 01-1.5 1.5z"
+        />
+      </svg>
+    ),
+    permission: 'view_charts',
+  },
+  {
     label: 'Documents',
     href: '/documents',
     icon: (

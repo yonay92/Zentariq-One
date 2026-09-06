@@ -30,8 +30,9 @@ export const E2E_USERS = {
   // e2e_admin deliberately excludes reopen_visit (ADMIN_EXCLUDED_PERMISSIONS
   // below, mirroring the real bootstrapped Administrator) — none of the other
   // seeded personas hold it either, so the Visit Calendar e2e suite's Reopen
-  // coverage needs a persona that does. Smallest possible addition: base
-  // access + reopen_visit only, nothing else.
+  // coverage needs a persona that does. Reused by tests/e2e/charts.spec.ts
+  // (Milestone 4.1) for the same reason on reopen_chart — one dangerous-
+  // operation-override persona, not a second one per module.
   reopener: { email: 'e2e-reopener@zentariq-e2e.test', roleKey: 'e2e_reopener' },
 } as const;
 
@@ -104,6 +105,14 @@ const ADMIN_EXCLUDED_PERMISSIONS = new Set([
   'force_archive_site',
   'reopen_visit',
   'override_regulatory_status',
+  // Added alongside Milestone 4.1's e2e coverage — mirrors
+  // CompanyService.ADMIN_EXCLUDED_PERMISSIONS exactly (migration 026 added
+  // reopen_chart to the same "conscious per-role override" category as
+  // reopen_visit). Without this, e2e_admin would incorrectly gain
+  // reopen_chart, which a real bootstrapped Administrator never has by
+  // default — that mismatch would make any e2e_admin-based "cannot reopen a
+  // chart" assertion false.
+  'reopen_chart',
 ]);
 
 const BASE_ACCESS_PERMISSIONS = [
@@ -236,7 +245,17 @@ export async function seedIdentityFixtures(): Promise<E2EIdentityFixtures> {
   // (VisitService.reopenVisit -> PermissionService.guardDangerousOperation).
   // Without it the reopen write itself is silently blocked by RLS (0 rows
   // affected -> "Cannot coerce the result to a single JSON object").
-  const reopenerPerms = [...BASE_ACCESS_PERMISSIONS, 'manage_visits', 'reopen_visit'];
+  // view_charts + reopen_chart added alongside Milestone 4.1's e2e coverage —
+  // unlike visits' RLS gate, charts_update's WITH-permission clause accepts
+  // reopen_chart on its own (no separate base-write permission needed), so
+  // no chart equivalent of manage_visits is required here.
+  const reopenerPerms = [
+    ...BASE_ACCESS_PERMISSIONS,
+    'manage_visits',
+    'reopen_visit',
+    'view_charts',
+    'reopen_chart',
+  ];
 
   const adminRoleId = await findOrCreateRole(
     supabase,

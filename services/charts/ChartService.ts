@@ -5,7 +5,12 @@ import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/error
 import type {
   Chart,
   ChartStatus,
+  ChartPriority,
   ChartAging,
+  ChartHistoryEntry,
+  ChartQueueFilters,
+  ChartQueueItem,
+  ChartQueueResult,
   MarkEnteredInEdcInput,
   ReopenChartInput,
 } from '@/types/charts';
@@ -14,6 +19,33 @@ import type { RequestContext } from '@/types/api';
 
 const CHART_COLUMNS =
   'id, company_id, site_id, study_id, subject_id, visit_id, chart_ready_date, entered_in_edc_date, entered_by, entered_by_role, days_until_entry, priority, status, created_at, updated_at';
+const CHART_HISTORY_COLUMNS =
+  'id, company_id, chart_id, old_status, new_status, changed_by, changed_at, reason';
+
+const DEFAULT_QUEUE_PAGE_SIZE = 25;
+const MAX_QUEUE_PAGE_SIZE = 100;
+
+// docs/UI_UX_09_Charts.md queue order: 1. Most overdue, 2. Out of Window,
+// 3. Sponsor-related, 4. Remaining. sponsorVisitApproaching is always false
+// in Milestone 4.1 (Phase A/B decision P3 — no authoritative data source
+// exists yet), so that tier folds into "remaining" until it does; days-based
+// overdue-ness and out-of-window both already surface as 'critical' via
+// computeChartAging, so this fixed business-rule order is expressed as:
+// priority tier desc, then days-pending desc (breaks ties within a tier by
+// "most overdue" first), then created_at asc (stable, oldest-first fallback,
+// same final tiebreak GAP_ANALYSIS's GAP-PERF-02 documents).
+const PRIORITY_RANK: Record<ChartPriority, number> = { critical: 4, high: 3, medium: 2, low: 1 };
+
+function compareChartQueueItems(a: ChartQueueItem, b: ChartQueueItem): number {
+  const rankDiff = PRIORITY_RANK[b.effective_priority] - PRIORITY_RANK[a.effective_priority];
+  if (rankDiff !== 0) return rankDiff;
+
+  const daysA = a.days_since_ready ?? -1;
+  const daysB = b.days_since_ready ?? -1;
+  if (daysB !== daysA) return daysB - daysA;
+
+  return a.created_at.localeCompare(b.created_at);
+}
 
 // The state machine approved in Phase B (docs/BUSINESS_RULES_05_Charts_DataEntry.md
 // + docs/DATABASE_Part_04's exact status vocabulary — no additional states
@@ -229,6 +261,149 @@ export const ChartService = {
 
   async getChartById(chartId: string, ctx: RequestContext): Promise<Chart> {
     return getChartOrThrow(chartId, ctx);
+  },
+
+  // Append-only transition ledger for the Chart Detail workspace's History
+  // section (Milestone 4.1). getChartOrThrow's view_charts + company_id +
+  // RLS (can_access_site) checks already gate the chart itself; chart_history
+  // has no site_id of its own to check independently.
+  async getChartHistory(chartId: string, ctx: RequestContext): Promise<ChartHistoryEntry[]> {
+    await getChartOrThrow(chartId, ctx);
+
+    const supabase = await createServerSupabaseClient();
+    const { data, error } = await supabase
+      .from('chart_history')
+      .select(CHART_HISTORY_COLUMNS)
+      .eq('chart_id', chartId)
+      .eq('company_id', ctx.company.id)
+      .order('changed_at', { ascending: false });
+
+    if (error) throw new DatabaseError(error.message);
+    return (data as ChartHistoryEntry[]) ?? [];
+  },
+
+  // Milestone 4.1 — the one new read method backing both the Chart Queue and
+  // the Subject Profile Charts tab (Phase A/B decision P1). Security scoping
+  // (company_id here, company_id + can_access_site via RLS's charts_select
+  // policy underneath) is applied to the base query BEFORE any of the
+  // application-layer priority-filter/sort/pagination below runs (P2) — this
+  // method never fetches out-of-scope rows and narrows down after the fact.
+  async listCharts(filters: ChartQueueFilters, ctx: RequestContext): Promise<ChartQueueResult> {
+    await PermissionService.requirePermission(ctx.user.id, 'view_charts');
+
+    const supabase = await createServerSupabaseClient();
+
+    let query = supabase.from('charts').select(CHART_COLUMNS).eq('company_id', ctx.company.id);
+    if (filters.site_id) query = query.eq('site_id', filters.site_id);
+    if (filters.study_id) query = query.eq('study_id', filters.study_id);
+    if (filters.subject_id) query = query.eq('subject_id', filters.subject_id);
+    if (filters.status) query = query.eq('status', filters.status);
+
+    const { data, error } = await query;
+    if (error) throw new DatabaseError(error.message);
+    const charts = (data as Chart[]) ?? [];
+
+    const page = filters.page && filters.page > 0 ? filters.page : 1;
+    const pageSize =
+      filters.page_size && filters.page_size > 0
+        ? Math.min(filters.page_size, MAX_QUEUE_PAGE_SIZE)
+        : DEFAULT_QUEUE_PAGE_SIZE;
+
+    if (charts.length === 0) {
+      return { data: [], total: 0, page, page_size: pageSize };
+    }
+
+    // Batched (not per-chart) enrichment — same bounded-query-count pattern
+    // as VisitService.enrichCalendarEvents, regardless of how many charts
+    // are returned.
+    const visitIds = [...new Set(charts.map((c) => c.visit_id))];
+    const subjectIds = [...new Set(charts.map((c) => c.subject_id))];
+    const studyIds = [...new Set(charts.map((c) => c.study_id))];
+    const siteIds = [...new Set(charts.map((c) => c.site_id))];
+
+    const [visitsRes, subjectsRes, studiesRes, sitesRes] = await Promise.all([
+      supabase
+        .from('visits')
+        .select('id, visit_name, target_date, scheduled_date, status')
+        .eq('company_id', ctx.company.id)
+        .in('id', visitIds),
+      supabase
+        .from('subjects')
+        .select('id, subject_number')
+        .eq('company_id', ctx.company.id)
+        .in('id', subjectIds),
+      supabase
+        .from('studies')
+        .select('id, study_name')
+        .eq('company_id', ctx.company.id)
+        .in('id', studyIds),
+      supabase.from('sites').select('id, name').eq('company_id', ctx.company.id).in('id', siteIds),
+    ]);
+    if (visitsRes.error) throw new DatabaseError(visitsRes.error.message);
+    if (subjectsRes.error) throw new DatabaseError(subjectsRes.error.message);
+    if (studiesRes.error) throw new DatabaseError(studiesRes.error.message);
+    if (sitesRes.error) throw new DatabaseError(sitesRes.error.message);
+
+    type VisitLookup = {
+      id: string;
+      visit_name: string;
+      target_date: string | null;
+      scheduled_date: string | null;
+      status: VisitStatus;
+    };
+    const visitById = new Map(((visitsRes.data as VisitLookup[]) ?? []).map((v) => [v.id, v]));
+    const subjectNumberById = new Map(
+      ((subjectsRes.data as Array<{ id: string; subject_number: string }>) ?? []).map((s) => [
+        s.id,
+        s.subject_number,
+      ]),
+    );
+    const studyNameById = new Map(
+      ((studiesRes.data as Array<{ id: string; study_name: string }>) ?? []).map((s) => [
+        s.id,
+        s.study_name,
+      ]),
+    );
+    const siteNameById = new Map(
+      ((sitesRes.data as Array<{ id: string; name: string }>) ?? []).map((s) => [s.id, s.name]),
+    );
+
+    let items: ChartQueueItem[] = charts.map((chart) => {
+      const visit = visitById.get(chart.visit_id);
+      const isOutOfWindow = visit?.status === 'out_of_window';
+      // sponsorVisitApproaching intentionally always false in Milestone 4.1
+      // (approved P3) — no authoritative sponsor-visit data source exists.
+      const aging = computeChartAging(chart, { isOutOfWindow, sponsorVisitApproaching: false });
+      return {
+        ...chart,
+        ...aging,
+        subject_number: subjectNumberById.get(chart.subject_id) ?? '—',
+        study_name: studyNameById.get(chart.study_id) ?? '—',
+        site_name: siteNameById.get(chart.site_id) ?? '—',
+        visit_name: visit?.visit_name ?? '—',
+        visit_date: visit?.scheduled_date ?? visit?.target_date ?? null,
+        is_out_of_window: isOutOfWindow,
+      };
+    });
+
+    // Priority is compute-on-read (Decision 3) and NOT reliably reflected by
+    // the stored charts.priority column (never updated by any transition
+    // above) — filtering by priority must happen here, after computation,
+    // never as a DB `.eq('priority', ...)` against that stale column.
+    if (filters.priority) {
+      items = items.filter((item) => item.effective_priority === filters.priority);
+    }
+
+    // Fixed business-rule order (not user-selectable, unlike Leads'
+    // sort_by/sort_dir) — application-layer per P2, isolated to this one
+    // spot so it can move to a DB ORDER BY later without changing this
+    // method's return contract.
+    items.sort(compareChartQueueItems);
+
+    const total = items.length;
+    const paged = items.slice((page - 1) * pageSize, page * pageSize);
+
+    return { data: paged, total, page, page_size: pageSize };
   },
 
   async startDataEntry(chartId: string, ctx: RequestContext): Promise<Chart> {
