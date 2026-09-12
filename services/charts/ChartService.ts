@@ -16,6 +16,7 @@ import type {
   ReopenChartInput,
   ChartComment,
   AddChartCommentInput,
+  ChartMetrics,
 } from '@/types/charts';
 import type { Visit, VisitStatus } from '@/types/subjects';
 import type { RequestContext } from '@/types/api';
@@ -25,6 +26,8 @@ const CHART_COLUMNS =
 const CHART_HISTORY_COLUMNS =
   'id, company_id, chart_id, old_status, new_status, changed_by, changed_at, reason';
 const CHART_COMMENT_COLUMNS = 'id, company_id, chart_id, comment, created_by, created_at';
+const CHART_METRICS_COLUMNS =
+  'id, company_id, chart_id, ready_to_entry_hours, total_entry_hours, overdue_days, out_of_window, sponsor_priority, calculated_at';
 
 const DEFAULT_QUEUE_PAGE_SIZE = 25;
 const MAX_QUEUE_PAGE_SIZE = 100;
@@ -195,6 +198,79 @@ async function writeChartTransition(
   return updated as Chart;
 }
 
+// Milestone 4.3 / R5: exactly one current row per chart, recalculated in
+// place (ON CONFLICT chart_id DO UPDATE — chart_metrics.chart_id is UNIQUE,
+// migration 029). Called synchronously at the four points that change any of
+// this row's inputs (chart creation, start of entry, mark entered, reopen —
+// see each call site below); hold/release are not trigger points because no
+// field below depends on hold state. overdue_days reuses computeChartAging's
+// exact days-since-ready math (Decision 3) rather than a second formula, so
+// this reporting snapshot can never disagree with the live queue-priority
+// calculation — this is the concrete fix for GAP_ANALYSIS.md's GAP-DUP-03.
+// sponsor_priority is hardcoded false — see migration 029's header and
+// docs/BUSINESS_RULES_05_Charts_DataEntry.md's amended note: no
+// calendar_events row of event_type='sponsor_visit' can be produced by any
+// existing code path (verified during Milestone 4.3 planning), so this
+// mirrors ChartService.computeChartAging's own sponsorVisitApproaching=false
+// default rather than inventing a second, equally-unpopulated source.
+// Errors from this upsert are intentionally not surfaced to the caller —
+// same best-effort posture the sibling chart_history insert above already
+// has (its .error is likewise never checked) — a metrics-recalculation
+// failure must never block the actual chart transition it accompanies.
+async function upsertChartMetrics(
+  chart: Pick<Chart, 'id' | 'visit_id' | 'chart_ready_date' | 'entered_in_edc_date' | 'status'>,
+  ctx: RequestContext,
+): Promise<void> {
+  const supabase = await createServerSupabaseClient();
+
+  const [visitRes, firstInProgressRes] = await Promise.all([
+    supabase
+      .from('visits')
+      .select('status')
+      .eq('id', chart.visit_id)
+      .eq('company_id', ctx.company.id)
+      .maybeSingle(),
+    supabase
+      .from('chart_history')
+      .select('changed_at')
+      .eq('chart_id', chart.id)
+      .eq('company_id', ctx.company.id)
+      .eq('new_status', 'in_progress')
+      .order('changed_at', { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+  ]);
+
+  const isOutOfWindow =
+    (visitRes.data as { status?: VisitStatus } | null)?.status === 'out_of_window';
+  const { days_since_ready: overdueDays } = computeChartAging(chart, { isOutOfWindow });
+
+  const readyAt = chart.chart_ready_date ? new Date(chart.chart_ready_date).getTime() : null;
+  const firstInProgressAt = (firstInProgressRes.data as { changed_at?: string } | null)?.changed_at;
+  const readyToEntryHours =
+    readyAt !== null && firstInProgressAt
+      ? (new Date(firstInProgressAt).getTime() - readyAt) / 3_600_000
+      : null;
+  const totalEntryHours =
+    readyAt !== null && chart.entered_in_edc_date
+      ? (new Date(chart.entered_in_edc_date).getTime() - readyAt) / 3_600_000
+      : null;
+
+  await supabase.from('chart_metrics').upsert(
+    {
+      company_id: ctx.company.id,
+      chart_id: chart.id,
+      ready_to_entry_hours: readyToEntryHours,
+      total_entry_hours: totalEntryHours,
+      overdue_days: overdueDays,
+      out_of_window: isOutOfWindow,
+      sponsor_priority: false,
+      calculated_at: new Date().toISOString(),
+    },
+    { onConflict: 'chart_id' },
+  );
+}
+
 // Maps the atomic RPC's distinguishable error prefixes (migration 026,
 // complete_visit_with_chart) back to this codebase's normal AppError family,
 // so callers see the exact same error shape regardless of whether the
@@ -271,6 +347,17 @@ export const ChartService = {
         record_id: result.chart_id,
         new_value: { status: 'chart_ready', visit_id: visitId },
       });
+
+      await upsertChartMetrics(
+        {
+          id: result.chart_id,
+          visit_id: visitId,
+          chart_ready_date: new Date().toISOString(),
+          entered_in_edc_date: null,
+          status: 'chart_ready',
+        },
+        ctx,
+      );
     }
 
     return { visit: result.visit, chartId: result.chart_id, chartCreated: result.chart_created };
@@ -446,7 +533,11 @@ export const ChartService = {
       throw new BusinessRuleError(`A chart in "${chart.status}" status cannot begin data entry.`);
     }
 
-    return writeChartTransition(chart, 'in_progress', ctx, { auditAction: 'chart.entry_started' });
+    const updated = await writeChartTransition(chart, 'in_progress', ctx, {
+      auditAction: 'chart.entry_started',
+    });
+    await upsertChartMetrics(updated, ctx);
+    return updated;
   },
 
   async holdChart(chartId: string, ctx: RequestContext): Promise<Chart> {
@@ -487,7 +578,7 @@ export const ChartService = {
       );
     }
 
-    return writeChartTransition(chart, 'entered_in_edc', ctx, {
+    const updated = await writeChartTransition(chart, 'entered_in_edc', ctx, {
       auditAction: 'chart.entered',
       extraFields: {
         entered_by: ctx.user.id,
@@ -495,6 +586,8 @@ export const ChartService = {
         entered_in_edc_date: new Date().toISOString(),
       },
     });
+    await upsertChartMetrics(updated, ctx);
+    return updated;
   },
 
   // Decision 2, RULE C: explicit permission + mandatory reason + full audit
@@ -515,10 +608,12 @@ export const ChartService = {
         'Reopening an Entered-in-EDC chart requires the Reopen Chart permission and a reason.',
     });
 
-    return writeChartTransition(chart, 'in_progress', ctx, {
+    const updated = await writeChartTransition(chart, 'in_progress', ctx, {
       reason: input.reason,
       auditAction: 'chart.reopened',
     });
+    await upsertChartMetrics(updated, ctx);
+    return updated;
   },
 
   // Milestone 4.3 / R3, R4: comment_chart is the ONLY gate — deliberately not
@@ -584,5 +679,23 @@ export const ChartService = {
 
     if (error) throw new DatabaseError(error.message);
     return (data as ChartComment[]) ?? [];
+  },
+
+  // Milestone 4.3 — read-only projection of the single upserted row
+  // upsertChartMetrics maintains. Requires view_charts, same as every other
+  // chart read.
+  async getMetrics(chartId: string, ctx: RequestContext): Promise<ChartMetrics> {
+    await getChartOrThrow(chartId, ctx);
+
+    const supabase = await createServerSupabaseClient();
+    const { data, error } = await supabase
+      .from('chart_metrics')
+      .select(CHART_METRICS_COLUMNS)
+      .eq('chart_id', chartId)
+      .eq('company_id', ctx.company.id)
+      .single();
+
+    if (error || !data) throw new NotFoundError('Chart metrics');
+    return data as ChartMetrics;
   },
 };

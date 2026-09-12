@@ -645,10 +645,25 @@ describe('ChartService — company isolation', () => {
       },
       error: null,
     });
-    const from = vi.fn().mockReturnValue({
-      insert: vi.fn().mockReturnThis(),
+    // Generic chainable stub — also satisfies upsertChartMetrics' side-effect
+    // queries (visits select, chart_history select, chart_metrics upsert)
+    // triggered by ensureChartForCompletedVisit; this test only asserts the
+    // RPC call's own arguments, so those side-effect queries just need to
+    // resolve harmlessly, not be individually scripted.
+    const stub: Record<string, unknown> = {
+      select: vi.fn(),
+      eq: vi.fn(),
+      order: vi.fn(),
+      limit: vi.fn(),
+      insert: vi.fn(),
+      upsert: vi.fn(),
+      maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
       then: (resolve: (v: unknown) => void) => resolve({ data: null, error: null }),
-    });
+    };
+    for (const key of ['select', 'eq', 'order', 'limit', 'insert', 'upsert']) {
+      (stub[key] as ReturnType<typeof vi.fn>).mockReturnValue(stub);
+    }
+    const from = vi.fn().mockReturnValue(stub);
     vi.mocked(createServerSupabaseClient).mockResolvedValue({ from, rpc } as never);
 
     await ChartService.ensureChartForCompletedVisit(

@@ -83,15 +83,21 @@ function queryStub(data: unknown, error: unknown = null) {
     // getChartHistory orders by changed_at — chainable, terminal via the
     // same thenable as the rest of this stub.
     order: vi.fn().mockReturnThis(),
+    // Milestone 4.3 upsertChartMetrics' "first in_progress" chart_history
+    // lookup chains .order(...).limit(1).maybeSingle() — chainable like
+    // order, resolves via the same thenable/maybeSingle as the rest of this
+    // stub.
+    limit: vi.fn().mockReturnThis(),
     insert: vi.fn().mockReturnThis(),
     update: vi.fn().mockReturnThis(),
+    upsert: vi.fn().mockReturnThis(),
     maybeSingle: vi.fn().mockResolvedValue({ data, error }),
     single: vi.fn().mockResolvedValue({ data, error }),
     then: resolved.then.bind(resolved),
     catch: resolved.catch.bind(resolved),
     finally: resolved.finally.bind(resolved),
   };
-  for (const key of ['select', 'eq', 'in', 'order', 'insert', 'update']) {
+  for (const key of ['select', 'eq', 'in', 'order', 'limit', 'insert', 'update', 'upsert']) {
     (stub[key] as ReturnType<typeof vi.fn>).mockReturnValue(stub);
   }
   return stub;
@@ -218,6 +224,9 @@ describe('ChartService.ensureChartForCompletedVisit', () => {
         },
       },
       { data: null }, // chart_history insert (chart_created = true)
+      { data: { status: 'completed' } }, // upsertChartMetrics: visits select
+      { data: null }, // upsertChartMetrics: chart_history select (first in_progress)
+      { data: null }, // upsertChartMetrics: chart_metrics upsert
     );
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
@@ -243,6 +252,9 @@ describe('ChartService.ensureChartForCompletedVisit', () => {
         },
       },
       { data: null }, // chart_history insert
+      { data: { status: 'completed' } }, // upsertChartMetrics: visits select
+      { data: null }, // upsertChartMetrics: chart_history select (first in_progress)
+      { data: null }, // upsertChartMetrics: chart_metrics upsert
     );
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
@@ -388,6 +400,9 @@ describe('ChartService.startDataEntry', () => {
       { data: chart }, // getChartOrThrow
       { data: updated }, // charts update
       { data: null }, // chart_history insert
+      { data: { status: 'completed' } }, // upsertChartMetrics: visits select
+      { data: null }, // upsertChartMetrics: chart_history select (first in_progress)
+      { data: null }, // upsertChartMetrics: chart_metrics upsert
     );
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
@@ -420,6 +435,9 @@ describe('ChartService.markEnteredInEdc', () => {
       { data: chart }, // getChartOrThrow
       { data: updated }, // charts update
       { data: null }, // chart_history insert
+      { data: { status: 'completed' } }, // upsertChartMetrics: visits select
+      { data: { changed_at: '2026-01-02T00:00:00Z' } }, // upsertChartMetrics: chart_history select (first in_progress)
+      { data: null }, // upsertChartMetrics: chart_metrics upsert
     );
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
@@ -489,6 +507,9 @@ describe('ChartService.reopenChart', () => {
       { data: chart }, // getChartOrThrow
       { data: updated }, // charts update
       { data: null }, // chart_history insert
+      { data: { status: 'completed' } }, // upsertChartMetrics: visits select
+      { data: { changed_at: '2026-01-02T00:00:00Z' } }, // upsertChartMetrics: chart_history select (first in_progress)
+      { data: null }, // upsertChartMetrics: chart_metrics upsert
     );
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
@@ -650,6 +671,122 @@ describe('ChartService.getComments', () => {
     const result = await ChartService.getComments(CHART_ID, makeCtx());
 
     expect(result).toEqual(comments);
+  });
+});
+
+// ── chart_metrics recalculation (Milestone 4.3, R5 — upsert semantics) ─────
+
+describe('ChartService chart_metrics recalculation', () => {
+  it('markEnteredInEdc computes ready_to_entry_hours and total_entry_hours from chart_ready_date, the first in_progress transition, and entered_in_edc_date', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+
+    const chart = makeChart({
+      status: 'in_progress',
+      chart_ready_date: '2026-01-01T00:00:00Z',
+    });
+    const updated = {
+      ...chart,
+      status: 'entered_in_edc',
+      entered_by: USER_ID,
+      entered_in_edc_date: '2026-01-03T12:00:00Z', // 60 hours after chart_ready_date
+    };
+    const client = makeSupabaseClient(
+      { data: chart }, // getChartOrThrow
+      { data: updated }, // charts update
+      { data: null }, // chart_history insert
+      { data: { status: 'chart_ready' } }, // upsertChartMetrics: visits select
+      { data: { changed_at: '2026-01-01T06:00:00Z' } }, // upsertChartMetrics: first in_progress — 6 hours after ready
+      { data: null }, // upsertChartMetrics: chart_metrics upsert
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await ChartService.markEnteredInEdc(CHART_ID, { entered_by_role: 'data_entry' }, makeCtx());
+
+    const metricsStub = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock
+      .results[5]?.value as { upsert: ReturnType<typeof vi.fn> };
+    const upsertArg = metricsStub.upsert.mock.calls[0]?.[0] as Record<string, unknown>;
+    const upsertOpts = metricsStub.upsert.mock.calls[0]?.[1] as Record<string, unknown>;
+
+    expect(upsertArg).toMatchObject({
+      company_id: COMPANY_ID,
+      chart_id: CHART_ID,
+      ready_to_entry_hours: 6,
+      total_entry_hours: 60,
+      out_of_window: false,
+      sponsor_priority: false,
+    });
+    expect(upsertOpts).toEqual({ onConflict: 'chart_id' });
+  });
+
+  it('marks out_of_window true and reflects it in the recalculated metrics row', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+
+    const chart = makeChart({ status: 'chart_ready', chart_ready_date: '2026-01-01T00:00:00Z' });
+    const updated = { ...chart, status: 'in_progress' };
+    const client = makeSupabaseClient(
+      { data: chart }, // getChartOrThrow
+      { data: updated }, // charts update
+      { data: null }, // chart_history insert
+      { data: { status: 'out_of_window' } }, // upsertChartMetrics: visits select
+      { data: null }, // upsertChartMetrics: first in_progress (none yet)
+      { data: null }, // upsertChartMetrics: chart_metrics upsert
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await ChartService.startDataEntry(CHART_ID, makeCtx());
+
+    const metricsStub = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock
+      .results[5]?.value as { upsert: ReturnType<typeof vi.fn> };
+    const upsertArg = metricsStub.upsert.mock.calls[0]?.[0] as Record<string, unknown>;
+
+    expect(upsertArg).toMatchObject({ out_of_window: true, ready_to_entry_hours: null });
+  });
+});
+
+describe('ChartService.getMetrics', () => {
+  it('rejects a caller without view_charts', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('view_charts'),
+    );
+
+    await expect(ChartService.getMetrics(CHART_ID, makeCtx())).rejects.toThrow(
+      PermissionDeniedError,
+    );
+  });
+
+  it('throws NotFoundError when no metrics row exists yet for the chart', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const client = makeSupabaseClient(
+      { data: makeChart() }, // getChartOrThrow
+      { data: null }, // chart_metrics select — not found
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await expect(ChartService.getMetrics(CHART_ID, makeCtx())).rejects.toThrow(NotFoundError);
+  });
+
+  it('returns the current metrics row scoped to the chart and company', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const metrics = {
+      id: 'metrics-uuid',
+      company_id: COMPANY_ID,
+      chart_id: CHART_ID,
+      ready_to_entry_hours: 6,
+      total_entry_hours: 60,
+      overdue_days: 0,
+      out_of_window: false,
+      sponsor_priority: false,
+      calculated_at: '2026-01-03T12:00:00Z',
+    };
+    const client = makeSupabaseClient(
+      { data: makeChart() }, // getChartOrThrow
+      { data: metrics }, // chart_metrics select
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await ChartService.getMetrics(CHART_ID, makeCtx());
+
+    expect(result).toEqual(metrics);
   });
 });
 
