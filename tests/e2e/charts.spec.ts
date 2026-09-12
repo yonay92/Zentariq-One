@@ -188,6 +188,36 @@ test.describe.serial('Charts / Data Entry UI', () => {
       await expect(page.getByText('No actions available for this chart.')).toBeVisible();
       await expect(page.getByRole('button', { name: 'Reopen' })).toHaveCount(0);
     });
+
+    // Milestone 4.3 / R4: comment_chart is independent of reopen_chart — a
+    // comment must be postable on this locked (entered_in_edc) chart even
+    // though the section above just proved this same persona has NO other
+    // action available on it.
+    test('Milestone 4.3: e2e_admin (comment_chart, no reopen_chart) can still add a comment on the locked chart', async ({
+      page,
+    }) => {
+      await page.goto(`/charts/${chartId}#comments`);
+      await expect(page.getByPlaceholder('Add a comment…')).toBeVisible({ timeout: 10000 });
+      await page.getByPlaceholder('Add a comment…').fill('E2E comment on a locked chart');
+      await page.getByRole('button', { name: 'Add Comment' }).click();
+
+      await expect(page.getByText('E2E comment on a locked chart')).toBeVisible({
+        timeout: 10000,
+      });
+    });
+
+    test('Milestone 4.3: the Metrics panel reflects the completed lifecycle (total entry time recorded, not out of window)', async ({
+      page,
+    }) => {
+      await page.goto(`/charts/${chartId}`);
+      await expect(page.getByText('Total Entry Time')).toBeVisible({ timeout: 10000 });
+      await expect(page.getByText('Out of Window')).toBeVisible();
+      // Baseline was completed on time in the scaffolding step above, so
+      // Out of Window must read "No" — this is the one deterministic
+      // assertion available without depending on exact elapsed-hours timing.
+      const outOfWindowRow = page.locator('div', { hasText: 'Out of Window' }).last();
+      await expect(outOfWindowRow.getByText('No')).toBeVisible();
+    });
   });
 
   test.describe('Unauthorized access — e2e_nophi persona (lacks view_charts)', () => {
@@ -213,6 +243,22 @@ test.describe.serial('Charts / Data Entry UI', () => {
     }) => {
       await page.goto('/charts/00000000-0000-0000-0000-000000000000');
       await expect(page.getByText('Chart not found')).toBeVisible({ timeout: 10000 });
+    });
+
+    test('Milestone 4.3: POST /api/charts/[id]/comments is rejected with 403 (lacks comment_chart)', async ({
+      page,
+    }) => {
+      const res = await page.request.post(`/api/charts/${chartId}/comments`, {
+        data: { comment: 'Should never be persisted' },
+      });
+      expect(res.status()).toBe(403);
+    });
+
+    test('Milestone 4.3: GET /api/charts/[id]/metrics is rejected with 403 (lacks view_charts)', async ({
+      page,
+    }) => {
+      const res = await page.request.get(`/api/charts/${chartId}/metrics`);
+      expect(res.status()).toBe(403);
     });
   });
 

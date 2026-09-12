@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { createAdminSupabaseClient } from '@/lib/supabase/admin';
 import { UserService } from '@/services/users/UserService';
 import { SiteService } from '@/services/sites/SiteService';
 import { CompanyService } from '@/services/company/CompanyService';
@@ -677,5 +678,72 @@ describe('ChartService — company isolation', () => {
       'complete_visit_with_chart',
       expect.objectContaining({ p_company_id: COMPANY_B }),
     );
+  });
+
+  // Milestone 4.3 — comment_chart's own scoping is exercised in
+  // ChartService.test.ts; this suite only re-verifies the company_id
+  // boundary itself, matching every other method above.
+  it('addComment() scopes the internal chart lookup and the comment insert to the context company_id, not a client-supplied one', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const adminTracking = makeTrackingClient({
+      id: 'chart-1',
+      company_id: COMPANY_B,
+      site_id: 'site-1',
+    });
+    vi.mocked(createAdminSupabaseClient).mockReturnValue(adminTracking.client);
+
+    const insertedComment = {
+      id: 'comment-1',
+      company_id: COMPANY_B,
+      chart_id: 'chart-1',
+      comment: 'Test',
+      created_by: USER_A,
+      created_at: '2026-01-01T00:00:00Z',
+    };
+    const serverTracking = makeTrackingClient(insertedComment);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(serverTracking.client);
+
+    await ChartService.addComment('chart-1', { comment: 'Test' }, makeCtx(COMPANY_B));
+
+    const adminCompanyEq = adminTracking.eqCalls.find(([col]) => col === 'company_id');
+    expect(adminCompanyEq).toBeDefined();
+    expect(adminCompanyEq![1]).toBe(COMPANY_B);
+    expect(adminCompanyEq![1]).not.toBe(COMPANY_A);
+
+    const insertArg = serverTracking.fromFn.mock.results[0]?.value.insert.mock.calls[0]?.[0] as
+      Record<string, unknown> | undefined;
+    expect(insertArg?.company_id).toBe(COMPANY_B);
+  });
+
+  it('getComments() scopes both the chart lookup and the comments query to company_id from context', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const { client, eqCalls } = makeTrackingClient({
+      id: 'chart-1',
+      company_id: COMPANY_B,
+      site_id: 'site-1',
+    });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await ChartService.getComments('chart-1', makeCtx(COMPANY_B));
+
+    const companyEqCalls = eqCalls.filter(([col]) => col === 'company_id');
+    expect(companyEqCalls.length).toBeGreaterThanOrEqual(2); // chart lookup + comments select
+    expect(companyEqCalls.every(([, val]) => val === COMPANY_B)).toBe(true);
+  });
+
+  it('getMetrics() scopes both the chart lookup and the metrics query to company_id from context', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const { client, eqCalls } = makeTrackingClient({
+      id: 'chart-1',
+      company_id: COMPANY_B,
+      site_id: 'site-1',
+    });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await ChartService.getMetrics('chart-1', makeCtx(COMPANY_B));
+
+    const companyEqCalls = eqCalls.filter(([col]) => col === 'company_id');
+    expect(companyEqCalls.length).toBeGreaterThanOrEqual(2); // chart lookup + metrics select
+    expect(companyEqCalls.every(([, val]) => val === COMPANY_B)).toBe(true);
   });
 });
