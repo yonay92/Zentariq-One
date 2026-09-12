@@ -207,6 +207,7 @@ export const CompanyService = {
       'manage_visits',
       'mark_chart_ready',
       'view_charts',
+      'comment_chart',
       'view_regulatory',
       'view_documents',
       'view_tasks',
@@ -230,6 +231,7 @@ export const CompanyService = {
       'view_dashboard',
       'view_charts',
       'mark_chart_entered',
+      'comment_chart',
       'view_tasks',
       'complete_task',
     ]

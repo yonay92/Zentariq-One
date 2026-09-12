@@ -26,6 +26,7 @@ INSERT INTO permissions (key, module, description) VALUES
   ('mark_chart_ready',            'charts',        'Manage a chart through the pre-entry pipeline (start entry, hold, release)'),
   ('mark_chart_entered',          'charts',        'Mark a chart as entered in EDC'),
   ('reopen_chart',                'charts',        'Reopen an Entered-in-EDC chart for authorized correction'),
+  ('comment_chart',               'charts',        'Add a comment to a chart'),
 
   -- Regulatory
   ('view_regulatory',             'regulatory',    'View regulatory documents and binders'),
