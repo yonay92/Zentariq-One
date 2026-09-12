@@ -192,15 +192,34 @@ test.describe.serial('Charts / Data Entry UI', () => {
     // Milestone 4.3 / R4: comment_chart is independent of reopen_chart — a
     // comment must be postable on this locked (entered_in_edc) chart even
     // though the section above just proved this same persona has NO other
-    // action available on it.
+    // action available on it. Explicitly waits for the real POST response
+    // (asserting it actually succeeded server-side) rather than trusting
+    // getByText alone against the rendered list — the textarea keeps
+    // displaying its typed value until the request resolves, so a
+    // text-only assertion here could theoretically pass without a real
+    // round trip having completed.
     test('Milestone 4.3: e2e_admin (comment_chart, no reopen_chart) can still add a comment on the locked chart', async ({
       page,
     }) => {
       await page.goto(`/charts/${chartId}#comments`);
       await expect(page.getByPlaceholder('Add a comment…')).toBeVisible({ timeout: 10000 });
       await page.getByPlaceholder('Add a comment…').fill('E2E comment on a locked chart');
-      await page.getByRole('button', { name: 'Add Comment' }).click();
 
+      const [postResponse] = await Promise.all([
+        page.waitForResponse(
+          (res) =>
+            res.url().includes(`/api/charts/${chartId}/comments`) &&
+            res.request().method() === 'POST',
+          { timeout: 10000 },
+        ),
+        page.getByRole('button', { name: 'Add Comment' }).click(),
+      ]);
+      expect(postResponse.ok()).toBeTruthy();
+      const postBody = (await postResponse.json()) as { success: boolean; data?: { id: string } };
+      expect(postBody.success).toBe(true);
+      expect(postBody.data?.id).toBeTruthy();
+
+      await expect(page.getByPlaceholder('Add a comment…')).toHaveValue('');
       await expect(page.getByText('E2E comment on a locked chart')).toBeVisible({
         timeout: 10000,
       });
