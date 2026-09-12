@@ -20,6 +20,16 @@ Critical:
 - > 7 days overdue.
 - Out of Window.
 
+**Known limitation (Milestone 4.1–4.3):** "Sponsor Visit approaching" is not
+currently detectable. `calendar_events` has an `event_type='sponsor_visit'`
+value defined in its schema, but no existing service, API route, or UI can
+ever create such a row — `VisitService` only ever writes `'patient_visit'`
+events, and no `CalendarService`/manual-create UI exists. `ChartService`'s
+`sponsorVisitApproaching` therefore stays hardcoded `false` (both in the
+live queue-priority computation and in `chart_metrics.sponsor_priority`,
+Milestone 4.3). Building the missing write path is out of scope for the
+Charts milestones — it requires its own scoped Calendar/scheduling design.
+
 High:
 
 - 4-7 days overdue.

@@ -86,6 +86,12 @@ chart_comments
 - created_at timestamptz default now()
 ```
 
+Implemented in migration `029_chart_comments_metrics.sql`. Append-only —
+no UPDATE/DELETE RLS policy exists at all (Milestone 4.3): no edit, no
+delete, no hard-delete route. Postable on a locked (`entered_in_edc`)
+chart; requires the dedicated `comment_chart` permission, independent of
+`view_charts`/`mark_chart_ready`/`mark_chart_entered`/`reopen_chart`.
+
 ---
 
 ## 5. Table: chart_metrics
@@ -96,7 +102,9 @@ Stores calculated chart metrics.
 chart_metrics
 - id uuid primary key
 - company_id uuid references companies(id)
-- chart_id uuid references charts(id)
+- chart_id uuid references charts(id) — UNIQUE (Milestone 4.3: one current
+  row per chart, recalculated in place via upsert, never an append-only
+  history)
 - ready_to_entry_hours numeric
 - total_entry_hours numeric
 - overdue_days numeric
@@ -104,6 +112,12 @@ chart_metrics
 - sponsor_priority boolean default false
 - calculated_at timestamptz default now()
 ```
+
+Implemented in migration `029_chart_comments_metrics.sql`. `overdue_days`
+reuses `ChartService.computeChartAging`'s exact formula (Decision 3) — see
+`GAP_ANALYSIS.md`'s amended GAP-DUP-03. `sponsor_priority` is currently
+always `false` — see `BUSINESS_RULES_05_Charts_DataEntry.md`'s "Known
+limitation" note.
 
 ---
 

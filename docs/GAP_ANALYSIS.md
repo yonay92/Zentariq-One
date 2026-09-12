@@ -359,6 +359,8 @@ CREATE INDEX idx_audit_logs_module ON audit_logs(module);
 
 **Resolution:** `charts.priority` is the cached computed value (critical/high/medium/low). `chart_metrics` stores the raw inputs. The BusinessRuleEngine reads `chart_metrics` to set `charts.priority`. Priority must be recalculated when `chart_metrics` changes.
 
+**Amendment (Milestone 4.0–4.3, shipped architecture supersedes the above):** the BusinessRuleEngine does not exist yet (Sprint 9), and `charts.priority` is never updated after creation. Priority is instead computed on every read by `ChartService.computeChartAging` (pure function, no persistence) — this is the one authoritative "days overdue → priority tier" calculation in the codebase. `chart_metrics.overdue_days` (added Milestone 4.3, migration 029) explicitly reuses this exact same function rather than a second formula, so the two can never disagree. `chart_metrics` is a derived reporting snapshot only; it does not drive `charts.priority`, and nothing writes back to `charts.priority` after chart creation.
+
 ---
 
 ## 6. AI Architecture Gaps
@@ -461,6 +463,8 @@ CREATE INDEX idx_audit_logs_module ON audit_logs(module);
 **Source:** The chart queue must sort by: (1) critical overdue, (2) out of window, (3) sponsor-related, (4) remaining. This cannot be done with a simple `ORDER BY` without calculated columns.
 
 **Recommendation:** Implement `calculate_chart_priority()` as a SQL function (already in SUPABASE_SETUP spec). Add a `priority_score numeric` column to `charts` that is computed by the function and updated by the BusinessRuleEngine. Sort queue by `priority_score DESC, created_at ASC`.
+
+**Amendment (Milestone 4.1, shipped architecture supersedes the above):** no `priority_score` column or SQL function was built. `ChartService.listCharts` computes each row's `effective_priority` in TypeScript via `computeChartAging` and sorts in application code (`compareChartQueueItems`: priority tier desc, then days-pending desc, then `created_at` asc). This performs adequately at current data volumes; revisit only if queue size is measured to be a real bottleneck (see CLAUDE.md Performance policy — measure first).
 
 ---
 

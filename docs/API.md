@@ -733,47 +733,58 @@ Rule:
 
 ## 14. Charts API
 
+**Amendment (Milestone 4.1/4.3 — shipped shape supersedes the routes originally sketched below):** there is no separate `GET /api/charts/queue` or generic `PATCH /api/charts/:id/status`. `GET /api/charts` itself returns the prioritized, paginated queue (`ChartService.listCharts`), and each status transition has its own dedicated route instead of one generic status endpoint — matching the state machine in migration 026.
+
 ### GET /api/charts
 
-Filters:
+Filters: `site_id`, `study_id`, `subject_id`, `status`, `priority`, `page`, `page_size`. Returns the prioritized Data Entry queue directly (ordering: priority tier desc, then days-pending desc, then `created_at` asc — see `ChartService.compareChartQueueItems`).
 
-- site_id
-- study_id
-- status
-- priority
-- days pending
+### GET /api/charts/:id
 
-### GET /api/charts/queue
+Returns a single chart.
 
-Returns prioritized Data Entry queue.
+### POST /api/charts/:id/start
 
-Ordering:
+Starts data entry (`chart_ready`/`on_hold` → `in_progress`).
 
-1. Critical overdue
-2. Out of Window
-3. Sponsor Visit related
-4. Remaining charts
+### POST /api/charts/:id/hold
 
-### PATCH /api/charts/:id/status
+Puts a chart on hold (`chart_ready`/`in_progress` → `on_hold`).
 
-Changes chart status.
+### POST /api/charts/:id/release
+
+Releases a hold (`on_hold` → `chart_ready`).
 
 ### POST /api/charts/:id/mark-entered
 
-Marks chart as Entered in EDC.
+Marks chart as Entered in EDC (`in_progress` → `entered_in_edc`).
 
 Business Rules:
 
 - Set entered_in_edc_date.
-- Set entered_by.
-- Calculate days_until_entry.
-- Complete related task.
-- Update analytics.
-- Write audit log.
+- Set entered_by, entered_by_role.
+- Write chart_history + audit log.
+- Recalculate chart_metrics (Milestone 4.3).
+
+### POST /api/charts/:id/reopen
+
+Reopens an Entered-in-EDC chart (requires `reopen_chart` + a reason).
+
+### GET /api/charts/:id/history
+
+Returns the chart's status-transition ledger.
+
+### GET /api/charts/:id/comments
+
+Returns the chart's comment thread, newest first (Milestone 4.3).
 
 ### POST /api/charts/:id/comments
 
-Adds comment.
+Adds a comment. Requires the dedicated `comment_chart` permission — independent of `view_charts`/`mark_chart_ready`/`mark_chart_entered`/`reopen_chart`. Postable on a locked (`entered_in_edc`) chart without `reopen_chart`, since a comment never mutates the chart itself. Comments are permanent — no edit or delete route exists.
+
+### GET /api/charts/:id/metrics
+
+Returns the chart's current `chart_metrics` row (Milestone 4.3): `ready_to_entry_hours`, `total_entry_hours`, `overdue_days`, `out_of_window`, `sponsor_priority`. One row per chart, recalculated in place at chart creation, start of entry, mark entered, and reopen. `sponsor_priority` is currently always `false` — no `calendar_events` row of `event_type='sponsor_visit'` can be produced by any existing code path (verified during Milestone 4.3 planning); see `docs/BUSINESS_RULES_05_Charts_DataEntry.md`.
 
 ---
 
