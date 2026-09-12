@@ -51,6 +51,7 @@ export type PermissionKey =
   | 'mark_chart_ready'
   | 'mark_chart_entered'
   | 'reopen_chart'
+  | 'comment_chart'
   | 'view_regulatory'
   | 'upload_regulatory_document'
   | 'edit_regulatory_document'

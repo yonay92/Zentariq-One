@@ -80,3 +80,34 @@ export type ChartQueueResult = {
   page: number;
   page_size: number;
 };
+
+// Milestone 4.3 — append-only, permanent (no edit/delete surface anywhere,
+// enforced at the RLS level by chart_comments having no UPDATE/DELETE
+// policy — migration 029).
+export type ChartComment = {
+  id: string;
+  company_id: string;
+  chart_id: string;
+  comment: string;
+  created_by: string | null;
+  created_at: string;
+};
+
+export type AddChartCommentInput = {
+  comment: string;
+};
+
+// Milestone 4.3 — one current row per chart (chart_metrics.chart_id is
+// UNIQUE), recalculated in place. Derived/reporting snapshot only, never a
+// historical ledger — chart_history/audit_logs remain that.
+export type ChartMetrics = {
+  id: string;
+  company_id: string;
+  chart_id: string;
+  ready_to_entry_hours: number | null;
+  total_entry_hours: number | null;
+  overdue_days: number | null;
+  out_of_window: boolean;
+  sponsor_priority: boolean;
+  calculated_at: string;
+};

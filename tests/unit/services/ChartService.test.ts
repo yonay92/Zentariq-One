@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { createAdminSupabaseClient } from '@/lib/supabase/admin';
 import {
   ChartService,
   isValidChartTransition,
@@ -521,6 +522,134 @@ describe('ChartService.reopenChart', () => {
         }),
       }),
     );
+  });
+});
+
+// ── addComment / getComments (Milestone 4.3 — Chart Comments) ──────────────
+
+describe('ChartService.addComment', () => {
+  it('throws PermissionDeniedError when the caller lacks comment_chart', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('comment_chart'),
+    );
+
+    await expect(
+      ChartService.addComment(CHART_ID, { comment: 'Needs review' }, makeCtx()),
+    ).rejects.toThrow(PermissionDeniedError);
+
+    // R3: the permission check itself must be for comment_chart, never a
+    // substitute — proves the gate is the dedicated permission, not one of
+    // view_charts/mark_chart_ready/mark_chart_entered/reopen_chart.
+    expect(PermissionService.requirePermission).toHaveBeenCalledWith(USER_ID, 'comment_chart');
+  });
+
+  it('throws NotFoundError when the chart does not exist / is out of company scope', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createAdminSupabaseClient).mockReturnValue(makeSupabaseClient({ data: null }));
+
+    await expect(
+      ChartService.addComment(CHART_ID, { comment: 'Needs review' }, makeCtx()),
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it('adds a comment on an entered_in_edc (locked) chart without requiring reopen_chart (R4)', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createAdminSupabaseClient).mockReturnValue(
+      makeSupabaseClient({ data: makeChart({ status: 'entered_in_edc' }) }),
+    );
+    const insertedComment = {
+      id: 'comment-uuid',
+      company_id: COMPANY_ID,
+      chart_id: CHART_ID,
+      comment: 'Needs review',
+      created_by: USER_ID,
+      created_at: '2026-01-05T00:00:00Z',
+    };
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: insertedComment }),
+    );
+
+    const result = await ChartService.addComment(CHART_ID, { comment: 'Needs review' }, makeCtx());
+
+    expect(result).toEqual(insertedComment);
+    // guardDangerousOperation / hasPermission('reopen_chart') must never be
+    // consulted for a comment — proves comments are independent of the
+    // chart-lock gate.
+    expect(PermissionService.requirePermission).not.toHaveBeenCalledWith(USER_ID, 'reopen_chart');
+  });
+
+  it('writes an audit log entry for the comment, scoped to the chart and company', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createAdminSupabaseClient).mockReturnValue(makeSupabaseClient({ data: makeChart() }));
+    const insertedComment = {
+      id: 'comment-uuid',
+      company_id: COMPANY_ID,
+      chart_id: CHART_ID,
+      comment: 'Needs review',
+      created_by: USER_ID,
+      created_at: '2026-01-05T00:00:00Z',
+    };
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: insertedComment }),
+    );
+
+    await ChartService.addComment(CHART_ID, { comment: 'Needs review' }, makeCtx());
+
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        company_id: COMPANY_ID,
+        site_id: SITE_ID,
+        user_id: USER_ID,
+        action: 'chart.commented',
+        module: 'charts',
+        record_type: 'chart',
+        record_id: CHART_ID,
+        new_value: { comment_id: 'comment-uuid' },
+      }),
+    );
+  });
+});
+
+describe('ChartService.getComments', () => {
+  it('rejects a caller without view_charts', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('view_charts'),
+    );
+
+    await expect(ChartService.getComments(CHART_ID, makeCtx())).rejects.toThrow(
+      PermissionDeniedError,
+    );
+  });
+
+  it('returns comments scoped to the chart and company, newest first', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const comments = [
+      {
+        id: 'c2',
+        company_id: COMPANY_ID,
+        chart_id: CHART_ID,
+        comment: 'Second',
+        created_by: USER_ID,
+        created_at: '2026-01-06T00:00:00Z',
+      },
+      {
+        id: 'c1',
+        company_id: COMPANY_ID,
+        chart_id: CHART_ID,
+        comment: 'First',
+        created_by: USER_ID,
+        created_at: '2026-01-05T00:00:00Z',
+      },
+    ];
+    const client = makeSupabaseClient(
+      { data: makeChart() }, // getChartOrThrow
+      { data: comments }, // chart_comments select
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await ChartService.getComments(CHART_ID, makeCtx());
+
+    expect(result).toEqual(comments);
   });
 });
 

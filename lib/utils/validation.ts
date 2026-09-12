@@ -1004,6 +1004,13 @@ export const reopenChartSchema = z.object({
 
 export type ReopenChartSchema = z.infer<typeof reopenChartSchema>;
 
+// Milestone 4.3 — Chart Comments (append-only, no edit/delete schema needed).
+export const addChartCommentSchema = z.object({
+  comment: z.string().trim().min(1, 'A comment is required').max(4000),
+});
+
+export type AddChartCommentSchema = z.infer<typeof addChartCommentSchema>;
+
 // ── Document Center ───────────────────────────────────────────────────────────
 
 export const linkFileSchema = z.object({

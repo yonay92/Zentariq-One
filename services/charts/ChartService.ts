@@ -1,4 +1,5 @@
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { createAdminSupabaseClient } from '@/lib/supabase/admin';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
@@ -13,6 +14,8 @@ import type {
   ChartQueueResult,
   MarkEnteredInEdcInput,
   ReopenChartInput,
+  ChartComment,
+  AddChartCommentInput,
 } from '@/types/charts';
 import type { Visit, VisitStatus } from '@/types/subjects';
 import type { RequestContext } from '@/types/api';
@@ -21,6 +24,7 @@ const CHART_COLUMNS =
   'id, company_id, site_id, study_id, subject_id, visit_id, chart_ready_date, entered_in_edc_date, entered_by, entered_by_role, days_until_entry, priority, status, created_at, updated_at';
 const CHART_HISTORY_COLUMNS =
   'id, company_id, chart_id, old_status, new_status, changed_by, changed_at, reason';
+const CHART_COMMENT_COLUMNS = 'id, company_id, chart_id, comment, created_by, created_at';
 
 const DEFAULT_QUEUE_PAGE_SIZE = 25;
 const MAX_QUEUE_PAGE_SIZE = 100;
@@ -110,6 +114,34 @@ async function getChartOrThrow(chartId: string, ctx: RequestContext): Promise<Ch
   await PermissionService.requirePermission(ctx.user.id, 'view_charts');
 
   const supabase = await createServerSupabaseClient();
+  const { data, error } = await supabase
+    .from('charts')
+    .select(CHART_COLUMNS)
+    .eq('id', chartId)
+    .eq('company_id', ctx.company.id)
+    .single();
+
+  if (error || !data) throw new NotFoundError('Chart');
+  return data as Chart;
+}
+
+// Milestone 4.3 / R3: comment_chart must stand entirely on its own — never
+// coupled with or substituted by view_charts (or any other chart
+// permission). charts_select's RLS policy (migration 026) itself requires
+// view_charts, so looking the chart up through the normal session-scoped
+// client would silently re-introduce that dependency. This helper uses the
+// admin client purely to resolve the chart's existence/site_id/company_id
+// for scoping the comment insert and its audit log — never to bypass the
+// comment_chart permission check itself (callers always call
+// PermissionService.requirePermission(ctx.user.id, 'comment_chart') first),
+// and it re-validates company_id explicitly in TypeScript (defense in
+// depth, the same pattern migration 026's RPC uses for its own re-checks)
+// rather than trusting the admin client's lack of RLS.
+async function getChartForCommentScopeOrThrow(
+  chartId: string,
+  ctx: RequestContext,
+): Promise<Chart> {
+  const supabase = createAdminSupabaseClient();
   const { data, error } = await supabase
     .from('charts')
     .select(CHART_COLUMNS)
@@ -487,5 +519,70 @@ export const ChartService = {
       reason: input.reason,
       auditAction: 'chart.reopened',
     });
+  },
+
+  // Milestone 4.3 / R3, R4: comment_chart is the ONLY gate — deliberately not
+  // combined with view_charts, mark_chart_ready, mark_chart_entered, or
+  // reopen_chart (see getChartForCommentScopeOrThrow above for why the chart
+  // lookup itself uses the admin client rather than getChartOrThrow). A
+  // comment never touches charts.status or any clinical field, so it is
+  // postable on a locked (entered_in_edc) chart without reopen_chart —
+  // chart_comments has no UPDATE/DELETE RLS policy at all (migration 029),
+  // so this insert is the only way this table is ever written, and it can
+  // never be edited or removed afterward.
+  async addComment(
+    chartId: string,
+    input: AddChartCommentInput,
+    ctx: RequestContext,
+  ): Promise<ChartComment> {
+    await PermissionService.requirePermission(ctx.user.id, 'comment_chart');
+
+    const chart = await getChartForCommentScopeOrThrow(chartId, ctx);
+
+    const supabase = await createServerSupabaseClient();
+    const { data, error } = await supabase
+      .from('chart_comments')
+      .insert({
+        company_id: ctx.company.id,
+        chart_id: chart.id,
+        comment: input.comment,
+        created_by: ctx.user.id,
+      })
+      .select(CHART_COMMENT_COLUMNS)
+      .single();
+
+    if (error || !data) throw new DatabaseError(error?.message ?? 'Failed to add comment');
+
+    await AuditService.log({
+      company_id: ctx.company.id,
+      site_id: chart.site_id,
+      user_id: ctx.user.id,
+      action: 'chart.commented',
+      module: 'charts',
+      record_type: 'chart',
+      record_id: chart.id,
+      new_value: { comment_id: (data as ChartComment).id },
+    });
+
+    return data as ChartComment;
+  },
+
+  // Read path intentionally requires view_charts (chart_comments_select's
+  // RLS predicate, migration 029) — a separate, already-approved decision
+  // from the write-side comment_chart gate above, not a coupling of the two
+  // permissions.
+  async getComments(chartId: string, ctx: RequestContext): Promise<ChartComment[]> {
+    await getChartOrThrow(chartId, ctx);
+
+    const supabase = await createServerSupabaseClient();
+    const { data, error } = await supabase
+      .from('chart_comments')
+      .select(CHART_COMMENT_COLUMNS)
+      .eq('chart_id', chartId)
+      .eq('company_id', ctx.company.id)
+      .order('created_at', { ascending: false });
+
+    if (error) throw new DatabaseError(error.message);
+    return (data as ChartComment[]) ?? [];
   },
 };
