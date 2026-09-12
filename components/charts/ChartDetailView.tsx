@@ -7,6 +7,7 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { usePermissions } from '@/hooks/usePermissions';
 import { ChartStatusBadge, ChartPriorityBadge } from '@/components/charts/ChartStatusBadge';
 import { ChartHistoryList } from '@/components/charts/ChartHistoryList';
+import { ChartMetricsPanel } from '@/components/charts/ChartMetricsPanel';
 import { ChartCommentsSection } from '@/components/charts/ChartCommentsSection';
 import { ChartStartEntryAction } from '@/components/charts/actions/ChartStartEntryAction';
 import { ChartHoldAction } from '@/components/charts/actions/ChartHoldAction';
@@ -192,6 +193,11 @@ export function ChartDetailView({ chartId }: { chartId: string }) {
       <div>
         <h3 className="mb-2 text-sm font-semibold text-gray-900">History</h3>
         <ChartHistoryList chartId={chart.id} />
+      </div>
+
+      <div>
+        <h3 className="mb-2 text-sm font-semibold text-gray-900">Metrics</h3>
+        <ChartMetricsPanel chartId={chart.id} />
       </div>
 
       <div>
