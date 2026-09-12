@@ -138,11 +138,21 @@ function ChartQueueContent() {
       key: 'actions',
       header: '',
       render: (row) => (
-        <Link href={`/charts/${row.id}`}>
-          <Button variant="outline" size="sm">
-            Open Chart
-          </Button>
-        </Link>
+        <div className="flex gap-2">
+          <Link href={`/charts/${row.id}`}>
+            <Button variant="outline" size="sm">
+              Open Chart
+            </Button>
+          </Link>
+          {/* docs/UI_UX_09_Charts.md Quick Action — the Chart Detail page's
+              Comments section is the canonical comment interaction surface
+              (Milestone 4.3, P3); no inline modal is built here. */}
+          <Link href={`/charts/${row.id}#comments`}>
+            <Button variant="outline" size="sm">
+              Comment
+            </Button>
+          </Link>
+        </div>
       ),
     },
   ];
