@@ -872,32 +872,49 @@ Compares two files using AI.
 
 ## 17. Task Center API
 
+All routes require an authenticated session. Company and caller identity come from that session, never from the request. Errors follow the standard envelope: 400 validation, 401 unauthenticated, 403 forbidden, 404 not found, 422 business-rule/state-transition failure. Authorization (permissions, site access, self-assignee completion) is enforced by `TaskService`.
+
 ### GET /api/tasks
 
-Returns tasks assigned to current user or role.
+Task queue (requires `view_tasks`). Returns `{ data, total, page, page_size }`; each item includes the read-time fields `effective_priority`, `is_overdue` and `days_overdue`.
 
-Filters:
+Filters (all optional): `site_id` (uuid), `status` (`new | assigned | in_progress | waiting | completed | cancelled`), `priority` (`critical | high | medium | low`, matched against the computed effective priority), `assigned_to` (uuid), `page`, `page_size` (max 100).
 
-- site_id
-- priority
-- status
-- due date
+### POST /api/tasks
+
+Creates a manual task (requires `create_task`). Body: `site_id`, `title`, optional `description`, `priority`, `due_date` (ISO 8601 with offset), and `assigned_to` or `assigned_role`. Unknown fields are rejected with 400 (including `company_id`, `status`, `created_by_system` and `source_*`). Returns 201.
 
 ### GET /api/tasks/my-today
 
-Returns today's work queue.
+The current user's own open tasks. Self-scoped; accepts no user or filter input.
 
-### PATCH /api/tasks/:id/status
+### GET /api/tasks/:id
 
-Updates task status.
-
-### POST /api/tasks/:id/comments
-
-Adds task comment.
+Returns the task with the same read-time fields as the list endpoints (`effective_priority`, `is_overdue`, `days_overdue`), computed on read and never persisted.
 
 ### POST /api/tasks/:id/complete
 
-Completes task and executes completion workflow.
+Completes the task (`complete_task`, or the task's own assignee). No body.
+
+### POST /api/tasks/:id/cancel
+
+Cancels the task (`cancel_task`). Body: `{ "reason": string }` (required, non-blank).
+
+### POST /api/tasks/:id/reassign
+
+Reassigns the task (`assign_task`). Body: `{ "assigned_to": uuid }`. The target user's company and site access are validated by `TaskService`.
+
+### GET /api/tasks/:id/comments · POST /api/tasks/:id/comments
+
+Lists comments / adds a comment (`comment_task`). Body: `{ "comment": string }` (required, non-blank). Comments are append-only.
+
+### GET /api/tasks/:id/history
+
+Read-only status history for the task.
+
+### Status transitions
+
+There is no generic status-update route (the former `PATCH /tasks/:id/status` was never implemented). `in_progress` and `waiting` exist in the state machine but have no public Milestone 5.0 mutation route. The Chart reconciliation methods are service-level only and have no API route.
 
 ---
 
