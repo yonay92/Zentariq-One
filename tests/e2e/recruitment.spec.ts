@@ -316,7 +316,12 @@ test.describe.serial('Recruitment & Patient Management', () => {
 
     test('Contact Info is restricted on the lead detail page', async ({ page }) => {
       await page.goto(`/recruitment/${leadId}`);
-      await expect(page.getByRole('heading', { name: 'Restricted' })).toBeVisible();
+      // The detail page renders more than one "Restricted" panel for this
+      // persona (contact info and possible duplicates), so target the
+      // contact-information restriction by its own permission message.
+      await expect(
+        page.getByText("You do not have permission to view this lead's contact information."),
+      ).toBeVisible();
       await expect(page.getByText(LEAD_FULL_NAME)).not.toBeVisible();
       await expect(page.getByText(LEAD_PHONE)).not.toBeVisible();
     });

@@ -54,7 +54,7 @@ Runs once before the whole suite (`playwright.config.ts` → `globalSetup`):
 2. **Study fixtures** — NOT idempotent, created fresh every run: as the admin
    persona, over the real API (never raw SQL, so GAP-REQ-03's approved-template
    gate and `activateStudy`'s approved-template requirement are exercised
-   exactly as the UI would trigger them) — two studies, each assigned to the
+   exactly as the UI would trigger them) — three studies, each assigned to the
    seeded Site:
    - The PHI suite's study, with a 2-item Visit Template (`Baseline`,
      `is_baseline: true`, offset 0; a second item titled `Visit 2 (<runId>)`,
@@ -68,6 +68,12 @@ Runs once before the whole suite (`playwright.config.ts` → `globalSetup`):
      manage study staff yet, so this is a raw write for the same reason the
      identity fixtures above are, giving the Calendar's CRC filter a real,
      deterministic option.
+   - The Chart study shared by `charts.spec.ts` and `tasks.spec.ts`'s
+     Chart -> Task automation, with a 2-item Visit Template (`Baseline` plus
+     `Chart Follow-up (<runId>)`), approved and activated. Those specs each
+     create a subject and complete its Baseline to produce a chart; keeping
+     them off the Calendar study leaves `visit-calendar.spec.ts`'s visits the
+     only ones with their run-specific names.
 
    A fresh study per run means each spec always starts from a clean,
    subject-free study — no cross-run cleanup needed. Item titles that include
@@ -86,7 +92,8 @@ Runs once before the whole suite (`playwright.config.ts` → `globalSetup`):
 
 4. `tests/e2e/.auth/fixtures.json` — `{ siteName, studyName, studyId,
 visit2Name, calendarStudyName, calendarStudyId, lifecycleVisitName,
-rescheduleVisitName, cancelVisitName, crcFullName }` for spec files to read.
+rescheduleVisitName, cancelVisitName, chartStudyName, chartStudyId,
+crcFullName }` for spec files to read.
 
 `helpers/apiScaffold.ts` (`scaffoldActiveStudy`) is the shared "Study →
 assign Site → Visit Template → approve → activate" API sequence — used by
@@ -105,6 +112,49 @@ end — the thing that matters for a PHI-permission test is that a real
 (`NEXT_PUBLIC_SUPABASE_URL` in `.env.local`) is a dedicated dev/e2e project.**
 Do not point `PLAYWRIGHT_BASE_URL` / `.env.local` at a project holding real
 data and run this suite against it.
+
+## Migrations 027/028 on a fresh (non-original) database
+
+`supabase/migrations/027_charts_historical_backfill.sql` and
+`028_fix_chart_backfill_audit_scope.sql` are one-time, human-reviewed DML
+migrations scoped to specific, hardcoded row/company ids that only ever
+existed on the original "Zentariq ONE" project (ref `rgwdajhwrmipzxamnadm`).
+Both contain a hard precondition (`RAISE EXCEPTION` unless an exact historical
+row count matches) and neither makes any schema/function/policy/grant change.
+On a fresh database their precondition can never be satisfied (the target
+company doesn't exist), so they must never be executed there — and must never
+be edited or archived out of `supabase/migrations/` either (confirmed by a
+disposable local-Docker reproduction: removing an already-remotely-applied
+migration's file breaks `db push` for every later migration on whichever
+project already has it recorded, which would mean touching the original
+project's own ledger just to keep it working).
+
+**Fresh/non-original environment bootstrap** (verified end-to-end against
+"Zentariq ONE — Dev E2E", ref `tihpjvhufczssjoryidb`, 2026-09-26):
+
+1. Apply the normal chain up through migration 026.
+2. Reconcile 027/028 as applied _without_ executing their bodies:
+   `supabase migration repair --status applied 027 028` (ledger-only; never
+   touches schema or data — this is the only one of the two `repair` states
+   that actually stops `db push` from re-offering a version, confirmed
+   empirically; `--status reverted` does not).
+3. Continue `supabase db push` normally.
+4. `034_fresh_install_environment_reconciliation.sql` detects the absence of
+   the original historical company and records exactly one durable
+   reconciliation note (in a small, dedicated, RLS-locked
+   `migration_reconciliation_log` table — `audit_logs.company_id` is
+   `NOT NULL`, so it can't hold a fact that predates any company existing)
+   stating that 027/028 were reconciled, not executed, and why.
+5. Every later migration (035+) proceeds normally on this environment.
+
+**Original historical environment** (`rgwdajhwrmipzxamnadm`): 027/028 remain
+legitimately, permanently applied there exactly as they always were — nothing
+above ever touches that project. Migration 034 detects the original
+historical company (`a181874c-9f28-4822-97ae-8a5da769e91a`) together with its
+permanent "exactly 8 Sub-Milestone 4.2 backfilled charts" signature and takes
+a verified no-op path there — it never raises merely for being the original
+environment, and never touches `charts`/`chart_history`/`audit_logs`. Later
+migrations continue normally.
 
 ## Why Confirm/Start/Complete-Baseline run via `page.request`, not UI clicks
 
