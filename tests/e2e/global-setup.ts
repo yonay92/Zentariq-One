@@ -10,6 +10,7 @@ import {
   type E2EPersona,
 } from './helpers/seed';
 import { scaffoldActiveStudy } from './helpers/apiScaffold';
+import { seedTaskEngineFixtures, TASK_E2E_USERS } from './helpers/taskEngineFixtures';
 
 /**
  * Runs once before the e2e suite. Provisions the fixed company/roles/users
@@ -32,7 +33,10 @@ const AUTH_DIR = join(__dirname, '.auth');
 
 async function signInAndSaveState(
   baseURL: string,
-  persona: E2EPersona,
+  // E2EPersona | the two additional tasks.spec.ts-only persona names from
+  // helpers/taskEngineFixtures.ts — widened to string since this parameter
+  // only ever names an output file / error message, never a lookup key.
+  persona: E2EPersona | 'ze2eSiteScoped' | 'ze2eCompanyB',
   email: string,
   password: string,
 ): Promise<void> {
@@ -180,12 +184,64 @@ export default async function globalSetup(): Promise<void> {
   // filter has a real, deterministic option to select.
   await assignCrcStaff(identity.companyId, calendarStudyId, identity.users.admin.userId);
 
+  // A third study for the specs that complete a real Baseline to produce a
+  // chart (tests/e2e/charts.spec.ts, tests/e2e/tasks.spec.ts's Chart -> Task
+  // automation). Each of those creates its own subject, and every subject
+  // gets its own copy of the study's visits — on the Calendar study that
+  // meant extra "Lifecycle Visit (<runId>)" events on the same day, making
+  // visit-calendar.spec.ts's exact-name lookups ambiguous depending on which
+  // spec ran first. Keeping them on their own study leaves the Calendar study
+  // with visit-calendar.spec.ts's single subject only.
+  const chartStudyName = `E2E Chart Study ${runId}`;
+
+  const { studyId: chartStudyId } = await scaffoldActiveStudy(adminContext, {
+    studyName: chartStudyName,
+    siteId: site.id,
+    items: [
+      {
+        visit_name: 'Baseline',
+        visit_order: 0,
+        offset_days: 0,
+        window_before: 0,
+        window_after: 0,
+        visit_type: 'scheduled',
+        is_baseline: true,
+        is_required: true,
+      },
+      {
+        visit_name: `Chart Follow-up (${runId})`,
+        visit_order: 1,
+        offset_days: 0,
+        window_before: 3,
+        window_after: 3,
+        visit_type: 'scheduled',
+        is_baseline: false,
+        is_required: true,
+      },
+    ],
+  });
+
   await adminContext.storageState({ path: join(AUTH_DIR, 'admin.json') });
   await adminContext.dispose();
 
   await signInAndSaveState(baseURL, 'phi', E2E_USERS.phi.email, E2E_PASSWORD);
   await signInAndSaveState(baseURL, 'nophi', E2E_USERS.nophi.email, E2E_PASSWORD);
   await signInAndSaveState(baseURL, 'reopener', E2E_USERS.reopener.email, E2E_PASSWORD);
+
+  // Milestone 5.0 — tests/e2e/tasks.spec.ts's site/company-isolation
+  // coverage needs a second site and a second company, which none of the
+  // shared personas above provide (all four are single-company and
+  // view_all_sites). See helpers/taskEngineFixtures.ts for why this is a
+  // dedicated, additive fixture file rather than an extension of
+  // helpers/seed.ts itself.
+  const taskFixtures = await seedTaskEngineFixtures(identity.companyId, site.id);
+  await signInAndSaveState(
+    baseURL,
+    'ze2eSiteScoped',
+    TASK_E2E_USERS.siteScoped.email,
+    E2E_PASSWORD,
+  );
+  await signInAndSaveState(baseURL, 'ze2eCompanyB', TASK_E2E_USERS.companyB.email, E2E_PASSWORD);
 
   writeFileSync(
     join(AUTH_DIR, 'fixtures.json'),
@@ -200,10 +256,18 @@ export default async function globalSetup(): Promise<void> {
         lifecycleVisitName,
         rescheduleVisitName,
         cancelVisitName,
+        chartStudyName,
+        chartStudyId,
         // Matches the fixed full name findOrCreateUser assigns e2e-admin — the
         // CRC filter's options are sourced from profiles.full_name (see
         // StudyService.listCrcOptions), not the email.
         crcFullName: 'E2E Admin',
+        taskEngineSite2Id: taskFixtures.site2Id,
+        taskEngineSite2Name: taskFixtures.site2Name,
+        taskEngineCompanyBId: taskFixtures.companyBId,
+        taskEngineCompanyBSiteId: taskFixtures.companyBSiteId,
+        taskEngineSiteScopedUserId: taskFixtures.siteScoped.userId,
+        taskEngineCompanyBUserId: taskFixtures.companyB.userId,
       },
       null,
       2,

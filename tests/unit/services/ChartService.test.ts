@@ -8,11 +8,22 @@ import {
 } from '@/services/charts/ChartService';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
+import { TaskService } from '@/services/tasks/TaskService';
+import { logger } from '@/lib/logger';
 import { PermissionDeniedError, BusinessRuleError, NotFoundError } from '@/lib/api/errors';
 import type { Chart } from '@/types/charts';
 
 vi.mock('@/services/audit/AuditService', () => ({
   AuditService: { log: vi.fn() },
+}));
+
+// Milestone 5.0 integration: TaskService is mocked wholesale so its own
+// internal Supabase calls never compete with ChartService's own from()
+// response queues below — these tests verify ChartService calls TaskService
+// with the right arguments and handles its failures correctly, not
+// TaskService's own internals (that's TaskService.test.ts's job).
+vi.mock('@/services/tasks/TaskService', () => ({
+  TaskService: { ensureTaskForChartReady: vi.fn(), completeTaskForChart: vi.fn() },
 }));
 
 const COMPANY_ID = 'company-uuid';
@@ -125,6 +136,13 @@ function makeRpcClient(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: TaskService integration succeeds silently. Tests that care
+  // about its exact call arguments or failure handling override this.
+  vi.mocked(TaskService.ensureTaskForChartReady).mockResolvedValue({
+    taskId: 'task-uuid',
+    taskCreated: true,
+  });
+  vi.mocked(TaskService.completeTaskForChart).mockResolvedValue(undefined);
 });
 
 // ── Pure functions ───────────────────────────────────────────────────────
@@ -275,7 +293,80 @@ describe('ChartService.ensureChartForCompletedVisit', () => {
     );
   });
 
-  it('does NOT write chart_history/audit again on an idempotent retry (chart already existed)', async () => {
+  // ── Milestone 5.0 — TaskService integration ────────────────────────────
+
+  it('invokes TaskService.ensureTaskForChartReady exactly once, with the correct chart, title, priority, and due date', async () => {
+    const now = new Date('2026-01-05T10:00:00Z');
+    vi.useFakeTimers().setSystemTime(now);
+
+    const client = makeRpcClient(
+      {
+        data: {
+          visit: { id: VISIT_ID, site_id: SITE_ID, visit_name: 'Visit 3', status: 'completed' },
+          chart_id: CHART_ID,
+          chart_created: true,
+          already_completed: false,
+        },
+      },
+      { data: null },
+      { data: { status: 'completed' } },
+      { data: null },
+      { data: null },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await ChartService.ensureChartForCompletedVisit(VISIT_ID, SUBJECT_ID, 'completed', makeCtx());
+
+    expect(TaskService.ensureTaskForChartReady).toHaveBeenCalledTimes(1);
+    expect(TaskService.ensureTaskForChartReady).toHaveBeenCalledWith(
+      { id: CHART_ID, company_id: COMPANY_ID, site_id: SITE_ID },
+      {
+        title: 'Chart ready for entry: Visit 3',
+        priority: 'low', // 0 days since ready, not out of window
+        due_date: new Date(now.getTime() + 3 * 86_400_000).toISOString(),
+      },
+      expect.objectContaining({ company: expect.objectContaining({ id: COMPANY_ID }) }),
+    );
+    vi.useRealTimers();
+  });
+
+  it('passes priority "critical" for an out-of-window visit completion, reusing computeChartAging (no second priority algorithm)', async () => {
+    const client = makeRpcClient(
+      {
+        data: {
+          visit: {
+            id: VISIT_ID,
+            site_id: SITE_ID,
+            visit_name: 'Visit 3',
+            status: 'out_of_window',
+          },
+          chart_id: CHART_ID,
+          chart_created: true,
+          already_completed: false,
+        },
+      },
+      { data: null },
+      { data: { status: 'out_of_window' } },
+      { data: null },
+      { data: null },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await ChartService.ensureChartForCompletedVisit(
+      VISIT_ID,
+      SUBJECT_ID,
+      'out_of_window',
+      makeCtx(),
+    );
+
+    expect(TaskService.ensureTaskForChartReady).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ priority: 'critical' }),
+      expect.anything(),
+    );
+  });
+
+  it('does NOT write chart_history/audit again on an idempotent retry, and does NOT re-invoke TaskService', async () => {
     const client = makeRpcClient({
       data: {
         visit: { id: VISIT_ID, status: 'completed' },
@@ -295,6 +386,72 @@ describe('ChartService.ensureChartForCompletedVisit', () => {
 
     expect(result.chartCreated).toBe(false);
     expect(AuditService.log).not.toHaveBeenCalled();
+    expect(TaskService.ensureTaskForChartReady).not.toHaveBeenCalled();
+  });
+
+  it('chart creation still succeeds and returns normally when TaskService.ensureTaskForChartReady throws (logged, not propagated)', async () => {
+    const client = makeRpcClient(
+      {
+        data: {
+          visit: { id: VISIT_ID, site_id: SITE_ID, visit_name: 'Visit 3', status: 'completed' },
+          chart_id: CHART_ID,
+          chart_created: true,
+          already_completed: false,
+        },
+      },
+      { data: null },
+      { data: { status: 'completed' } },
+      { data: null },
+      { data: null },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+    vi.mocked(TaskService.ensureTaskForChartReady).mockRejectedValue(new Error('db unavailable'));
+    const loggerErrorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+    const result = await ChartService.ensureChartForCompletedVisit(
+      VISIT_ID,
+      SUBJECT_ID,
+      'completed',
+      makeCtx(),
+    );
+
+    // The chart mutation itself is the primary workflow — it already
+    // committed via the RPC before TaskService is ever called, and its
+    // success here is completely unaffected by the task-side failure.
+    expect(result.chartCreated).toBe(true);
+    expect(result.chartId).toBe(CHART_ID);
+    // Chart-side audit trail is unaffected.
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'chart.created' }),
+    );
+    // The failure is not silently dropped — it is logged for observability.
+    expect(loggerErrorSpy).toHaveBeenCalledWith(
+      'ChartService.ensureChartForCompletedVisit: task creation failed',
+      expect.objectContaining({ chartId: CHART_ID, error: 'db unavailable' }),
+    );
+  });
+
+  it('delegates task creation to TaskService entirely — ChartService never queries/writes tasks or task_history directly', async () => {
+    const client = makeRpcClient(
+      {
+        data: {
+          visit: { id: VISIT_ID, site_id: SITE_ID, visit_name: 'Visit 3', status: 'completed' },
+          chart_id: CHART_ID,
+          chart_created: true,
+          already_completed: false,
+        },
+      },
+      { data: null },
+      { data: { status: 'completed' } },
+      { data: null },
+      { data: null },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await ChartService.ensureChartForCompletedVisit(VISIT_ID, SUBJECT_ID, 'completed', makeCtx());
+
+    const fromCalls = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock.calls;
+    expect(fromCalls.some((c) => c[0] === 'tasks' || c[0] === 'task_history')).toBe(false);
   });
 
   it('maps a VISIT_STATE_CONFLICT RPC error to BusinessRuleError (concurrent completion race)', async () => {
@@ -456,6 +613,76 @@ describe('ChartService.markEnteredInEdc', () => {
     expect(AuditService.log).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'chart.entered', record_id: CHART_ID }),
     );
+    // Milestone 5.0 — the corresponding Data-Entry task is completed via
+    // TaskService, which owns locating/completing/history/audit for it —
+    // ChartService only supplies the chart id and context.
+    expect(TaskService.completeTaskForChart).toHaveBeenCalledWith(CHART_ID, expect.anything());
+  });
+
+  // ── Milestone 5.0 — TaskService integration ────────────────────────────
+
+  it('chart entered_in_edc still succeeds when TaskService.completeTaskForChart throws (logged, not propagated)', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const chart = makeChart({ status: 'in_progress' });
+    const updated = { ...chart, status: 'entered_in_edc', entered_by: USER_ID };
+    const client = makeSupabaseClient(
+      { data: chart },
+      { data: updated },
+      { data: null },
+      { data: { status: 'completed' } },
+      { data: { changed_at: '2026-01-02T00:00:00Z' } },
+      { data: null },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+    vi.mocked(TaskService.completeTaskForChart).mockRejectedValue(new Error('db unavailable'));
+    const loggerErrorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+    const result = await ChartService.markEnteredInEdc(
+      CHART_ID,
+      { entered_by_role: 'data_entry' },
+      makeCtx(),
+    );
+
+    // The chart's own transition already committed and is unaffected by
+    // the task-completion failure.
+    expect(result.status).toBe('entered_in_edc');
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'chart.entered' }),
+    );
+    expect(loggerErrorSpy).toHaveBeenCalledWith(
+      'ChartService.markEnteredInEdc: task completion failed',
+      expect.objectContaining({ chartId: CHART_ID, error: 'db unavailable' }),
+    );
+  });
+
+  it('relies entirely on TaskService.completeTaskForChart for the safe no-op when no open task exists — no duplicate query/update logic in ChartService', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const chart = makeChart({ status: 'in_progress' });
+    const updated = { ...chart, status: 'entered_in_edc', entered_by: USER_ID };
+    const client = makeSupabaseClient(
+      { data: chart },
+      { data: updated },
+      { data: null },
+      { data: { status: 'completed' } },
+      { data: null },
+      { data: null },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+    // TaskService's own safe no-op contract (verified independently in
+    // TaskService.test.ts) — here we only assert ChartService delegates to
+    // it and does not itself query/update tasks or task_history.
+    vi.mocked(TaskService.completeTaskForChart).mockResolvedValue(undefined);
+
+    const result = await ChartService.markEnteredInEdc(
+      CHART_ID,
+      { entered_by_role: 'data_entry' },
+      makeCtx(),
+    );
+
+    expect(result.status).toBe('entered_in_edc');
+    expect(TaskService.completeTaskForChart).toHaveBeenCalledTimes(1);
+    const fromCalls = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock.calls;
+    expect(fromCalls.some((c) => c[0] === 'tasks' || c[0] === 'task_history')).toBe(false);
   });
 });
 
@@ -1025,5 +1252,226 @@ describe('ChartService.listCharts', () => {
     expect(result.total).toBe(2);
     expect(result.data).toHaveLength(1);
     expect(result.data[0]?.id).toBe('chart-critical');
+  });
+});
+// ── Milestone 5.0 — Task reconciliation (explicit service-level recovery) ──
+
+describe('ChartService.reconcileReadyChartTask', () => {
+  let loggerErrorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(PermissionService, 'requireSiteAccess').mockResolvedValue(undefined);
+    loggerErrorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+  });
+
+  function readyClient(visit: { visit_name: string; status: string } | null = null) {
+    return makeSupabaseClient(
+      { data: makeChart({ chart_ready_date: '2026-01-01T00:00:00Z' }) },
+      { data: visit ?? { visit_name: 'Visit 3', status: 'completed' } },
+    );
+  }
+
+  it('invokes ensureTaskForChartReady with the chart context, original chart_ready_date + 3 days, and current effective priority', async () => {
+    // 5 full days after chart_ready_date -> 'high'; due date stays anchored
+    // to the ORIGINAL ready date, not reconciliation time.
+    vi.useFakeTimers().setSystemTime(new Date('2026-01-06T12:00:00Z'));
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(readyClient());
+
+    const result = await ChartService.reconcileReadyChartTask(CHART_ID, makeCtx());
+
+    expect(result).toEqual({ taskId: 'task-uuid', taskCreated: true });
+    expect(TaskService.ensureTaskForChartReady).toHaveBeenCalledTimes(1);
+    expect(TaskService.ensureTaskForChartReady).toHaveBeenCalledWith(
+      { id: CHART_ID, company_id: COMPANY_ID, site_id: SITE_ID },
+      {
+        title: 'Chart ready for entry: Visit 3',
+        priority: 'high',
+        due_date: '2026-01-04T00:00:00.000Z',
+      },
+      expect.objectContaining({
+        company: expect.objectContaining({ id: COMPANY_ID }),
+      }),
+    );
+    vi.useRealTimers();
+  });
+
+  it('uses critical priority for an out-of-window visit', async () => {
+    vi.useFakeTimers().setSystemTime(new Date('2026-01-01T06:00:00Z'));
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      readyClient({ visit_name: 'Visit 3', status: 'out_of_window' }),
+    );
+
+    await ChartService.reconcileReadyChartTask(CHART_ID, makeCtx());
+
+    expect(TaskService.ensureTaskForChartReady).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ priority: 'critical' }),
+      expect.anything(),
+    );
+    vi.useRealTimers();
+  });
+
+  it('is safe when an open task already exists (idempotent result from TaskService)', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(readyClient());
+    vi.mocked(TaskService.ensureTaskForChartReady).mockResolvedValue({
+      taskId: 'existing-task',
+      taskCreated: false,
+    });
+
+    await expect(ChartService.reconcileReadyChartTask(CHART_ID, makeCtx())).resolves.toEqual({
+      taskId: 'existing-task',
+      taskCreated: false,
+    });
+  });
+
+  it('rejects a chart from another company (lookup is company-scoped)', async () => {
+    const client = makeSupabaseClient({ data: null });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await expect(ChartService.reconcileReadyChartTask(CHART_ID, makeCtx())).rejects.toBeInstanceOf(
+      NotFoundError,
+    );
+    const chartsQuery = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock
+      .results[0]?.value as { eq: ReturnType<typeof vi.fn> };
+    expect(chartsQuery.eq).toHaveBeenCalledWith('company_id', COMPANY_ID);
+    expect(TaskService.ensureTaskForChartReady).not.toHaveBeenCalled();
+  });
+
+  it('rejects an inaccessible site', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(readyClient());
+    vi.spyOn(PermissionService, 'requireSiteAccess').mockRejectedValue(
+      new PermissionDeniedError(`site:${SITE_ID}`),
+    );
+
+    await expect(ChartService.reconcileReadyChartTask(CHART_ID, makeCtx())).rejects.toBeInstanceOf(
+      PermissionDeniedError,
+    );
+    expect(PermissionService.requireSiteAccess).toHaveBeenCalledWith(USER_ID, SITE_ID);
+    expect(TaskService.ensureTaskForChartReady).not.toHaveBeenCalled();
+  });
+
+  it.each(['in_progress', 'on_hold', 'entered_in_edc'] as const)(
+    'rejects a chart in %s status',
+    async (status) => {
+      vi.mocked(createServerSupabaseClient).mockResolvedValue(
+        makeSupabaseClient({ data: makeChart({ status }) }),
+      );
+
+      await expect(
+        ChartService.reconcileReadyChartTask(CHART_ID, makeCtx()),
+      ).rejects.toBeInstanceOf(BusinessRuleError);
+      expect(TaskService.ensureTaskForChartReady).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects a caller without mark_chart_ready', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('mark_chart_ready'),
+    );
+
+    await expect(ChartService.reconcileReadyChartTask(CHART_ID, makeCtx())).rejects.toBeInstanceOf(
+      PermissionDeniedError,
+    );
+    expect(TaskService.ensureTaskForChartReady).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a TaskService failure to the caller (not swallowed or logged-only)', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(readyClient());
+    vi.mocked(TaskService.ensureTaskForChartReady).mockRejectedValue(new Error('db unavailable'));
+
+    await expect(ChartService.reconcileReadyChartTask(CHART_ID, makeCtx())).rejects.toThrow(
+      'db unavailable',
+    );
+    expect(loggerErrorSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChartService.reconcileEnteredChartTask', () => {
+  let loggerErrorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(PermissionService, 'requireSiteAccess').mockResolvedValue(undefined);
+    loggerErrorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+  });
+
+  const enteredChart = () =>
+    makeChart({
+      status: 'entered_in_edc',
+      entered_in_edc_date: '2026-01-03T00:00:00Z',
+    });
+
+  it('invokes completeTaskForChart without modifying the chart', async () => {
+    const client = makeSupabaseClient({ data: enteredChart() });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await ChartService.reconcileEnteredChartTask(CHART_ID, makeCtx());
+
+    expect(TaskService.completeTaskForChart).toHaveBeenCalledTimes(1);
+    expect(TaskService.completeTaskForChart).toHaveBeenCalledWith(CHART_ID, expect.anything());
+    // Only the chart lookup — no update/insert against charts or history.
+    expect((client as unknown as { from: ReturnType<typeof vi.fn> }).from).toHaveBeenCalledTimes(1);
+    expect(AuditService.log).not.toHaveBeenCalled();
+  });
+
+  it('is safe when no open task exists (TaskService safe no-op contract)', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: enteredChart() }),
+    );
+    vi.mocked(TaskService.completeTaskForChart).mockResolvedValue(undefined);
+
+    await expect(
+      ChartService.reconcileEnteredChartTask(CHART_ID, makeCtx()),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects a chart from another company', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(makeSupabaseClient({ data: null }));
+
+    await expect(
+      ChartService.reconcileEnteredChartTask(CHART_ID, makeCtx()),
+    ).rejects.toBeInstanceOf(NotFoundError);
+    expect(TaskService.completeTaskForChart).not.toHaveBeenCalled();
+  });
+
+  it('rejects an inaccessible site', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: enteredChart() }),
+    );
+    vi.spyOn(PermissionService, 'requireSiteAccess').mockRejectedValue(
+      new PermissionDeniedError(`site:${SITE_ID}`),
+    );
+
+    await expect(
+      ChartService.reconcileEnteredChartTask(CHART_ID, makeCtx()),
+    ).rejects.toBeInstanceOf(PermissionDeniedError);
+    expect(TaskService.completeTaskForChart).not.toHaveBeenCalled();
+  });
+
+  it.each(['chart_ready', 'in_progress', 'on_hold'] as const)(
+    'rejects a chart in %s status',
+    async (status) => {
+      vi.mocked(createServerSupabaseClient).mockResolvedValue(
+        makeSupabaseClient({ data: makeChart({ status }) }),
+      );
+
+      await expect(
+        ChartService.reconcileEnteredChartTask(CHART_ID, makeCtx()),
+      ).rejects.toBeInstanceOf(BusinessRuleError);
+      expect(TaskService.completeTaskForChart).not.toHaveBeenCalled();
+    },
+  );
+
+  it('surfaces a TaskService failure to the caller', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: enteredChart() }),
+    );
+    vi.mocked(TaskService.completeTaskForChart).mockRejectedValue(new Error('db unavailable'));
+
+    await expect(ChartService.reconcileEnteredChartTask(CHART_ID, makeCtx())).rejects.toThrow(
+      'db unavailable',
+    );
+    expect(loggerErrorSpy).not.toHaveBeenCalled();
   });
 });

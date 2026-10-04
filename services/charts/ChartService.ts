@@ -2,6 +2,8 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { createAdminSupabaseClient } from '@/lib/supabase/admin';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
+import { TaskService } from '@/services/tasks/TaskService';
+import { logger } from '@/lib/logger';
 import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
 import type {
   Chart,
@@ -19,6 +21,7 @@ import type {
   ChartMetrics,
 } from '@/types/charts';
 import type { Visit, VisitStatus } from '@/types/subjects';
+import type { TaskPriority } from '@/types/tasks';
 import type { RequestContext } from '@/types/api';
 
 const CHART_COLUMNS =
@@ -111,6 +114,36 @@ export function computeChartAging(
     return { days_since_ready: daysSinceReady, effective_priority: 'medium' };
   }
   return { days_since_ready: daysSinceReady, effective_priority: 'low' };
+}
+
+// Milestone 5.0 — the single derivation of a Chart's Data-Entry Task input,
+// shared by normal chart creation (ensureChartForCompletedVisit) and explicit
+// reconciliation (reconcileReadyChartTask) so the two can never drift.
+// - title reuses NOTIFICATIONS.md's chart_ready template verbatim.
+// - priority reuses computeChartAging (no second Chart priority algorithm);
+//   `now` is the moment the effective priority is evaluated (creation time
+//   at creation, reconciliation time on recovery).
+// - due_date is ALWAYS the actual chart_ready_date + 3 days
+//   (BUSINESS_RULE_ENGINE.md §11 "Visit Completed - Create Chart" seed rule,
+//   due_date_offset_days: 3), never `now` + 3 days.
+// No description: subject/study display names are not available in either
+// call path without extra queries.
+function deriveChartReadyTaskInput(args: {
+  visitName: string;
+  status: ChartStatus;
+  chartReadyDate: string;
+  isOutOfWindow: boolean;
+  now: Date;
+}): { title: string; priority: TaskPriority; due_date: string } {
+  const aging = computeChartAging(
+    { status: args.status, chart_ready_date: args.chartReadyDate },
+    { isOutOfWindow: args.isOutOfWindow, sponsorVisitApproaching: false, now: args.now },
+  );
+  return {
+    title: `Chart ready for entry: ${args.visitName}`,
+    priority: aging.effective_priority,
+    due_date: new Date(new Date(args.chartReadyDate).getTime() + 3 * 86_400_000).toISOString(),
+  };
 }
 
 async function getChartOrThrow(chartId: string, ctx: RequestContext): Promise<Chart> {
@@ -328,6 +361,10 @@ export const ChartService = {
     // fabricate a second "chart.created" event for a chart that already
     // existed before this call even started.
     if (result.chart_created) {
+      const chartReadyAt = new Date();
+      const chartReadyDate = chartReadyAt.toISOString();
+      const isOutOfWindow = result.visit.status === 'out_of_window';
+
       await supabase.from('chart_history').insert({
         company_id: ctx.company.id,
         chart_id: result.chart_id,
@@ -352,15 +389,125 @@ export const ChartService = {
         {
           id: result.chart_id,
           visit_id: visitId,
-          chart_ready_date: new Date().toISOString(),
+          chart_ready_date: chartReadyDate,
           entered_in_edc_date: null,
           status: 'chart_ready',
         },
         ctx,
       );
+
+      // Milestone 5.0 — Charts is the first Task Engine producer
+      // (docs/BUSINESS_RULES_05_Charts_DataEntry.md "Chart Creation":
+      // "Create Data Entry Task"). Fire-and-forget: chart creation above is
+      // already committed and remains the source of truth regardless of
+      // the task side's outcome, matching the established posture for
+      // every other cascading side effect in this branch (chart_history /
+      // AuditService.log / upsertChartMetrics above never block or roll
+      // back chart creation on failure either — none of their own errors
+      // are even checked). Unlike those three, a failure here IS explicitly
+      // logged (matching NotificationService.dispatch's own catch+log
+      // posture) rather than silently dropped, since a missing Data-Entry
+      // task is a real operational gap worth surfacing. See the
+      // ChartService integration review for the full failure-mode and
+      // idempotent-retry analysis for this call.
+      try {
+        await TaskService.ensureTaskForChartReady(
+          { id: result.chart_id, company_id: ctx.company.id, site_id: result.visit.site_id },
+          deriveChartReadyTaskInput({
+            visitName: result.visit.visit_name,
+            status: 'chart_ready',
+            chartReadyDate,
+            isOutOfWindow,
+            now: chartReadyAt,
+          }),
+          ctx,
+        );
+      } catch (err) {
+        logger.error('ChartService.ensureChartForCompletedVisit: task creation failed', {
+          chartId: result.chart_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     return { visit: result.visit, chartId: result.chart_id, chartCreated: result.chart_created };
+  },
+
+  // Milestone 5.0 — explicit, idempotent recovery for a chart_ready Chart
+  // whose Data-Entry Task was never created because the fire-and-forget
+  // TaskService call in ensureChartForCompletedVisit failed. NOT a public
+  // repair primitive: no API route calls this. Authorization mirrors the
+  // primary workflow (mark_chart_ready), then the Chart must belong to
+  // ctx.company (getChartOrThrow, RLS-scoped) and the CALLER must have
+  // access to the Chart's site. TaskService owns target-assignee validation.
+  // Unlike the primary workflow, failures are NOT caught: they surface to
+  // the caller. Safe to repeat — TaskService.ensureTaskForChartReady is
+  // idempotent (uq_tasks_open_per_source) and returns taskCreated: false.
+  async reconcileReadyChartTask(
+    chartId: string,
+    ctx: RequestContext,
+  ): Promise<{ taskId: string; taskCreated: boolean }> {
+    await PermissionService.requirePermission(ctx.user.id, 'mark_chart_ready');
+
+    const chart = await getChartOrThrow(chartId, ctx);
+    await PermissionService.requireSiteAccess(ctx.user.id, chart.site_id);
+    if (chart.status !== 'chart_ready') {
+      throw new BusinessRuleError(
+        `Only a chart in "chart_ready" status can have its Data Entry task reconciled (found "${chart.status}").`,
+      );
+    }
+    if (!chart.chart_ready_date) {
+      throw new BusinessRuleError(
+        'Chart has no chart_ready_date; cannot derive its task due date.',
+      );
+    }
+
+    const supabase = await createServerSupabaseClient();
+    const { data: visit, error: visitError } = await supabase
+      .from('visits')
+      .select('visit_name, status')
+      .eq('id', chart.visit_id)
+      .eq('company_id', ctx.company.id)
+      .maybeSingle();
+    if (visitError) throw new DatabaseError(visitError.message);
+    if (!visit) throw new NotFoundError('Visit');
+    const { visit_name: visitName, status: visitStatus } = visit as {
+      visit_name: string;
+      status: VisitStatus;
+    };
+
+    return TaskService.ensureTaskForChartReady(
+      { id: chart.id, company_id: chart.company_id, site_id: chart.site_id },
+      deriveChartReadyTaskInput({
+        visitName,
+        status: chart.status,
+        chartReadyDate: chart.chart_ready_date,
+        isOutOfWindow: visitStatus === 'out_of_window',
+        now: new Date(),
+      }),
+      ctx,
+    );
+  },
+
+  // Milestone 5.0 — explicit, idempotent recovery for an entered_in_edc
+  // Chart whose open Data-Entry Task was left open because
+  // TaskService.completeTaskForChart failed inside markEnteredInEdc. Does
+  // not replay markEnteredInEdc and never touches Chart status. Same
+  // authorization posture as reconcileReadyChartTask (mark_chart_entered).
+  // Failures surface to the caller; when no open Task exists,
+  // completeTaskForChart's own safe no-op makes repeats harmless.
+  async reconcileEnteredChartTask(chartId: string, ctx: RequestContext): Promise<void> {
+    await PermissionService.requirePermission(ctx.user.id, 'mark_chart_entered');
+
+    const chart = await getChartOrThrow(chartId, ctx);
+    await PermissionService.requireSiteAccess(ctx.user.id, chart.site_id);
+    if (chart.status !== 'entered_in_edc') {
+      throw new BusinessRuleError(
+        `Only a chart in "entered_in_edc" status can have its Data Entry task reconciled (found "${chart.status}").`,
+      );
+    }
+
+    await TaskService.completeTaskForChart(chart.id, ctx);
   },
 
   async getChartByVisitId(visitId: string, ctx: RequestContext): Promise<Chart | null> {
@@ -587,6 +734,24 @@ export const ChartService = {
       },
     });
     await upsertChartMetrics(updated, ctx);
+
+    // Milestone 5.0 — complete the corresponding Data-Entry task, if one is
+    // still open. Same fire-and-forget-with-logging posture as the
+    // creation-side integration in ensureChartForCompletedVisit: the
+    // chart's own transition above is already committed and must not be
+    // rolled back by this downstream step. TaskService.completeTaskForChart
+    // is itself a safe no-op when no open task exists (e.g. it was
+    // manually cancelled, or predates this integration) — that safe-no-op
+    // contract is preserved here untouched, not duplicated.
+    try {
+      await TaskService.completeTaskForChart(chartId, ctx);
+    } catch (err) {
+      logger.error('ChartService.markEnteredInEdc: task completion failed', {
+        chartId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     return updated;
   },
 

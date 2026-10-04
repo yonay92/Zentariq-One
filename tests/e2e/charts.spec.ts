@@ -2,10 +2,11 @@
  * E2E tests: Charts / Data Entry UI (Milestone 4.1).
  * Runs against the Next.js dev/prod server with a real Supabase backend —
  * see tests/e2e/global-setup.ts / tests/e2e/README.md for the shared e2e
- * fixture design. Reuses the existing Calendar study fixture (Baseline +
- * three visits) rather than scaffolding a new study just for Charts — the
- * chart under test is the one automatically created by completing that
- * study's Baseline visit (SubjectService.completeBaselineVisit ->
+ * fixture design. Uses the shared Chart study fixture (Baseline + one
+ * follow-up visit, shared with tasks.spec.ts's Chart -> Task automation and
+ * kept off the Calendar study so visit-calendar.spec.ts's visits stay
+ * unique) — the chart under test is the one automatically created by
+ * completing that study's Baseline visit (SubjectService.completeBaselineVisit ->
  * ChartService.ensureChartForCompletedVisit, migration 026), never created
  * directly (Charts has no manual-create path, by design).
  *
@@ -25,7 +26,7 @@
  * already uses for the site-isolation question — verifying the feature's own
  * filter rather than duplicating service-level coverage).
  */
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -36,9 +37,50 @@ const REOPENER_STATE = join(AUTH_DIR, 'reopener.json');
 
 const fixtures = JSON.parse(readFileSync(join(AUTH_DIR, 'fixtures.json'), 'utf-8')) as {
   siteName: string;
-  calendarStudyName: string;
-  calendarStudyId: string;
+  chartStudyName: string;
+  chartStudyId: string;
 };
+
+// Selects a Chart Queue filter through its real control and waits for the
+// list request that carries it (filters change one at a time, so responses
+// never overlap).
+async function selectChartFilter(
+  page: Page,
+  label: string,
+  option: string,
+  param: string,
+): Promise<void> {
+  await Promise.all([
+    page.waitForResponse((res) => {
+      const url = new URL(res.url());
+      return (
+        url.pathname === '/api/charts' &&
+        res.request().method() === 'GET' &&
+        url.searchParams.has(param)
+      );
+    }),
+    page.getByRole('combobox', { name: label, exact: true }).selectOption({ label: option }),
+  ]);
+}
+
+// The Chart Queue paginates (25) over every chart the company has ever had —
+// this suite never deletes what it creates, and the approved order (priority
+// tier, days pending, oldest first) puts a new chart last. The run-specific
+// Chart study from global-setup.ts holds only this run's charts, so the
+// Study filter isolates the run; the single-page guard then proves the
+// visible page is the whole filtered result, so a lookup can't silently miss
+// a row that sits on page 2. Waits out the initial load first so a late
+// unfiltered response can't overwrite the filtered one.
+async function filterToRunChartStudy(page: Page): Promise<void> {
+  const settled = page.locator('table').first().or(page.getByText('No charts match these filters'));
+  await expect(settled).toBeVisible({ timeout: 10000 });
+  await selectChartFilter(page, 'Study', fixtures.chartStudyName, 'study_id');
+  await expect(settled).toBeVisible({ timeout: 10000 });
+  await expect(
+    page.getByText(/^Page \d+ of \d+/),
+    'the run-scoped Chart Queue must fit on a single page',
+  ).toHaveCount(0);
+}
 
 let subjectId = '';
 let subjectNumber = '';
@@ -65,7 +107,7 @@ test.describe.serial('Charts / Data Entry UI', () => {
       subjectNumber = `E2E-CHART-${Date.now()}`;
       const createRes = await page.request.post('/api/subjects', {
         data: {
-          study_id: fixtures.calendarStudyId,
+          study_id: fixtures.chartStudyId,
           site_id: site!.id,
           subject_number: subjectNumber,
         },
@@ -117,6 +159,7 @@ test.describe.serial('Charts / Data Entry UI', () => {
     }) => {
       await page.goto('/charts');
       await expect(page.getByRole('heading', { name: 'Chart Queue' })).toBeVisible();
+      await filterToRunChartStudy(page);
       await expect(page.getByRole('heading', { name: fixtures.siteName })).toBeVisible({
         timeout: 10000,
       });
@@ -127,19 +170,21 @@ test.describe.serial('Charts / Data Entry UI', () => {
 
     test('the Site filter narrows without hiding the seeded chart', async ({ page }) => {
       await page.goto('/charts');
+      await filterToRunChartStudy(page);
       await expect(page.getByRole('link', { name: subjectNumber, exact: true })).toBeVisible({
         timeout: 10000,
       });
 
-      await page.getByLabel('Site').selectOption({ label: fixtures.siteName });
+      await selectChartFilter(page, 'Site', fixtures.siteName, 'site_id');
       await expect(page.getByRole('link', { name: subjectNumber, exact: true })).toBeVisible();
 
-      await page.getByLabel('Status').selectOption({ label: 'Chart Ready' });
+      await selectChartFilter(page, 'Status', 'Chart Ready', 'status');
       await expect(page.getByRole('link', { name: subjectNumber, exact: true })).toBeVisible();
     });
 
     test('Open Chart navigates to the Chart Detail page', async ({ page }) => {
       await page.goto('/charts');
+      await filterToRunChartStudy(page);
       const row = page.locator('tr', { hasText: subjectNumber });
       await expect(row).toBeVisible({ timeout: 10000 });
       await row.getByRole('link', { name: 'Open Chart' }).click();

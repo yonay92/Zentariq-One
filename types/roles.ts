@@ -92,4 +92,11 @@ export type PermissionKey =
   | 'view_staff_credentials'
   | 'manage_staff_credentials'
   | 'view_regulatory_audit'
-  | 'override_regulatory_status';
+  | 'override_regulatory_status'
+  | 'view_tasks'
+  | 'complete_task'
+  | 'assign_task'
+  | 'create_task'
+  | 'comment_task'
+  | 'cancel_task'
+  | 'manage_chart_assignments';

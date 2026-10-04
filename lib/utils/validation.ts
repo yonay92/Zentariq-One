@@ -1020,3 +1020,66 @@ export const linkFileSchema = z.object({
 });
 
 export type LinkFileSchema = z.infer<typeof linkFileSchema>;
+
+// ── Task Engine (Milestone 5.0) ───────────────────────────────────────────────
+// Body schemas are .strict(): unknown keys (company_id, user_id, status,
+// created_by_system, source_*, effective_priority, ...) are REJECTED rather
+// than silently stripped, so a client can never believe it set them.
+
+const TASK_STATUSES = [
+  'new',
+  'assigned',
+  'in_progress',
+  'waiting',
+  'completed',
+  'cancelled',
+] as const;
+const TASK_PRIORITIES = ['critical', 'high', 'medium', 'low'] as const;
+
+export const taskIdSchema = z.string().uuid('Invalid task ID');
+
+export const listTasksSchema = z.object({
+  site_id: z.string().uuid().optional(),
+  status: z.enum(TASK_STATUSES).optional(),
+  priority: z.enum(TASK_PRIORITIES).optional(),
+  assigned_to: z.string().uuid().optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  page_size: z.coerce.number().int().min(1).max(100).optional(),
+});
+
+export type ListTasksSchema = z.infer<typeof listTasksSchema>;
+
+// Manual creation only: source_module/source_record_* and created_by_system
+// are deliberately not accepted, so a caller cannot impersonate Chart (or any
+// other module's) automation.
+export const createTaskSchema = z
+  .object({
+    site_id: z.string().uuid('Invalid site ID'),
+    title: z.string().trim().min(1, 'A title is required').max(200),
+    description: z.string().trim().min(1).max(4000).optional(),
+    priority: z.enum(TASK_PRIORITIES).optional(),
+    due_date: z.string().datetime({ offset: true, message: 'Invalid due date' }).optional(),
+    assigned_to: z.string().uuid('Invalid user ID').optional(),
+    assigned_role: z.string().trim().min(1).max(100).optional(),
+  })
+  .strict();
+
+export type CreateTaskSchema = z.infer<typeof createTaskSchema>;
+
+export const cancelTaskSchema = z
+  .object({ reason: z.string().trim().min(1, 'A reason is required').max(2000) })
+  .strict();
+
+export type CancelTaskSchema = z.infer<typeof cancelTaskSchema>;
+
+export const reassignTaskSchema = z
+  .object({ assigned_to: z.string().uuid('Invalid user ID') })
+  .strict();
+
+export type ReassignTaskSchema = z.infer<typeof reassignTaskSchema>;
+
+export const addTaskCommentSchema = z
+  .object({ comment: z.string().trim().min(1, 'A comment is required').max(4000) })
+  .strict();
+
+export type AddTaskCommentSchema = z.infer<typeof addTaskCommentSchema>;
