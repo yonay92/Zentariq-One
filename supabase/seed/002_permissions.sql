@@ -55,6 +55,6 @@ INSERT INTO permissions (key, module, description) VALUES
   ('manage_sites',                'settings',      'Create and manage clinical sites'),
   ('manage_users',                'settings',      'Invite, edit, and deactivate users'),
   ('view_all_sites',              'settings',      'Access records from all sites without site restriction'),
-  ('view_audit_logs',             'settings',      'View the immutable audit trail');
+  ('view_audit_logs',             'settings',      'View the immutable audit trail')
 
 ON CONFLICT (key) DO NOTHING;
