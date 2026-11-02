@@ -53,6 +53,32 @@ describe('resolveAuthContext', () => {
     expect(result.ok).toBe(false);
   });
 
+  it('classifies a zero-row lookup (PGRST116) as unauthenticated', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeClient({
+        authUser: { id: USER_ID },
+        profile: null,
+        profileError: { code: 'PGRST116', message: 'The result contains 0 rows' },
+      }),
+    );
+
+    const result = await resolveAuthContext({} as never);
+    expect(result).toMatchObject({ ok: false, kind: 'unauthenticated' });
+  });
+
+  it('classifies a failed lookup (e.g. 42501 permission denied) as unavailable, not signed out', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeClient({
+        authUser: { id: USER_ID },
+        profile: null,
+        profileError: { code: '42501', message: 'permission denied for table profiles' },
+      }),
+    );
+
+    const result = await resolveAuthContext({} as never);
+    expect(result).toMatchObject({ ok: false, kind: 'unavailable' });
+  });
+
   it('fetches profile and company in a single round trip and splits them correctly', async () => {
     const profileRow = {
       id: USER_ID,

@@ -44,6 +44,19 @@ export class AuthError extends AppError {
   }
 }
 
+export class RateLimitError extends AppError {
+  constructor(message: string) {
+    super(message, 'RATE_LIMITED');
+  }
+}
+
+/** A dependency (Auth provider, database) failed; the caller may retry later. */
+export class ServiceUnavailableError extends AppError {
+  constructor(message: string) {
+    super(message, 'SERVICE_UNAVAILABLE');
+  }
+}
+
 export class ConflictError extends AppError {
   constructor(message: string) {
     super(message, 'CONFLICT');

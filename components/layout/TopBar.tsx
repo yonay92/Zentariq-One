@@ -1,22 +1,17 @@
 'use client';
 
 import { useAuth } from '@/hooks/useAuth';
+import { useSignOut } from '@/hooks/useSignOut';
 import { NotificationBell } from './NotificationBell';
-import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
 export function TopBar() {
   const auth = useAuth();
-  const router = useRouter();
+  const { signOut, signingOut, error: signOutError } = useSignOut();
   const [menuOpen, setMenuOpen] = useState(false);
 
   const profile = auth.status === 'authenticated' ? auth.profile : null;
   const company = auth.status === 'authenticated' ? auth.company : null;
-
-  async function handleSignOut() {
-    await fetch('/api/auth/signout', { method: 'POST' });
-    router.push('/login');
-  }
 
   const initials = profile?.full_name
     ? profile.full_name
@@ -35,6 +30,12 @@ export function TopBar() {
       </div>
 
       <div className="flex items-center gap-3">
+        {signOutError && (
+          <p role="alert" className="text-xs text-red-600">
+            {signOutError}
+          </p>
+        )}
+
         <NotificationBell />
 
         <div className="relative">
@@ -70,13 +71,14 @@ export function TopBar() {
                 </div>
                 <button
                   type="button"
+                  disabled={signingOut}
                   onClick={() => {
                     setMenuOpen(false);
-                    void handleSignOut();
+                    void signOut();
                   }}
-                  className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50"
+                  className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
                 >
-                  Sign out
+                  {signingOut ? 'Signing out…' : 'Sign out'}
                 </button>
               </div>
             </>

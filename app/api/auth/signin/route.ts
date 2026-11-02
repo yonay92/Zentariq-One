@@ -1,8 +1,13 @@
 import { type NextRequest } from 'next/server';
 import { successResponse, errorResponse } from '@/lib/api/response';
 import { signInSchema } from '@/lib/utils/validation';
-import { AuthService } from '@/services/auth/AuthService';
-import { AuthError, NotFoundError } from '@/lib/api/errors';
+import { AuthService, SIGN_IN_MESSAGES } from '@/services/auth/AuthService';
+import {
+  AuthError,
+  NotFoundError,
+  RateLimitError,
+  ServiceUnavailableError,
+} from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 
 export async function POST(request: NextRequest) {
@@ -22,11 +27,19 @@ export async function POST(request: NextRequest) {
       return errorResponse('UNAUTHORIZED', 401, { message: error.message });
     }
     if (error instanceof NotFoundError) {
-      return errorResponse('UNAUTHORIZED', 401, { message: 'Account not found' });
+      return errorResponse('UNAUTHORIZED', 401, {
+        message: 'No active account is linked to these credentials. Contact your administrator.',
+      });
+    }
+    if (error instanceof RateLimitError) {
+      return errorResponse('RATE_LIMITED', 429, { message: error.message });
+    }
+    if (error instanceof ServiceUnavailableError) {
+      return errorResponse('SERVICE_UNAVAILABLE', 503, { message: error.message });
     }
     logger.error('POST /api/auth/signin failed', {
-      error: error instanceof Error ? error.message : String(error),
+      errorName: error instanceof Error ? error.name : 'unknown',
     });
-    return errorResponse('INTERNAL_ERROR', 500);
+    return errorResponse('INTERNAL_ERROR', 500, { message: SIGN_IN_MESSAGES.unavailable });
   }
 }
