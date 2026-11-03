@@ -1,5 +1,6 @@
 import { type NextRequest } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { logger } from '@/lib/logger';
 import type { Profile, Company } from '@/types/users';
 
 export type AuthContext = {
@@ -7,9 +8,20 @@ export type AuthContext = {
   company: Company;
 };
 
-type AuthResult = { ok: true; user: Profile; company: Company } | { ok: false; reason: string };
+/**
+ * `kind` distinguishes "there is no usable identity" (no session, or no
+ * active profile/company — respond 401) from "the identity could not be
+ * loaded" (the lookup itself failed — a server-side fault, not a sign-in
+ * problem). Routes that only check `ok` keep their existing behaviour.
+ */
+type AuthResult =
+  | { ok: true; user: Profile; company: Company }
+  | { ok: false; kind: 'unauthenticated' | 'unavailable'; reason: string };
 
 type ProfileWithCompany = Profile & { companies: Company };
+
+// PostgREST: `.single()` matched zero rows.
+const NO_ROWS = 'PGRST116';
 
 export async function resolveAuthContext(request: NextRequest): Promise<AuthResult> {
   const supabase = await createServerSupabaseClient();
@@ -20,7 +32,7 @@ export async function resolveAuthContext(request: NextRequest): Promise<AuthResu
   } = await supabase.auth.getUser();
 
   if (authError || !authUser) {
-    return { ok: false, reason: 'No authenticated session' };
+    return { ok: false, kind: 'unauthenticated', reason: 'No authenticated session' };
   }
 
   // Single round trip for both profile and company (previously two sequential
@@ -37,8 +49,17 @@ export async function resolveAuthContext(request: NextRequest): Promise<AuthResu
     .eq('companies.status', 'active')
     .single();
 
-  if (profileError || !profile) {
-    return { ok: false, reason: 'User profile or company not found or inactive' };
+  if (profileError && profileError.code !== NO_ROWS) {
+    logger.error('resolveAuthContext: profile lookup failed', { code: profileError.code ?? null });
+    return { ok: false, kind: 'unavailable', reason: 'User profile could not be loaded' };
+  }
+
+  if (!profile) {
+    return {
+      ok: false,
+      kind: 'unauthenticated',
+      reason: 'User profile or company not found or inactive',
+    };
   }
 
   const { companies: company, ...user } = profile as unknown as ProfileWithCompany;

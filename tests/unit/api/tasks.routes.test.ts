@@ -69,7 +69,11 @@ const ctxMatcher = { user: AUTH_USER, company: AUTH_COMPANY };
 
 describe('authentication (all routes)', () => {
   it('returns 401 without calling TaskService when unauthenticated', async () => {
-    vi.mocked(resolveAuthContext).mockResolvedValue({ ok: false, reason: 'none' });
+    vi.mocked(resolveAuthContext).mockResolvedValue({
+      ok: false,
+      kind: 'unauthenticated',
+      reason: 'none',
+    });
     const responses = await Promise.all([
       listGET(req('/api/tasks')),
       createPOST(req('/api/tasks', 'POST', {})),

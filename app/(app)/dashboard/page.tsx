@@ -2,7 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/hooks/useAuth';
+import { useSignOut } from '@/hooks/useSignOut';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { Button } from '@/components/ui/Button';
+import { AlertBanner } from '@/components/ui/AlertBanner';
 import { countActiveStudies, countEnrolledSubjects } from '@/lib/utils/dashboardStats';
 import type { Study } from '@/types/studies';
 import type { Subject } from '@/types/subjects';
@@ -63,6 +67,75 @@ function useDashboardSummary() {
   return { activeStudies, enrolledSubjects, loading, error };
 }
 
+/**
+ * Shown instead of the dashboard when the signed-in identity cannot be used.
+ * Every action is user-initiated — nothing here redirects or refetches on its
+ * own, so a persistent failure can never loop. "Sign in again" goes through
+ * the sign-out endpoint first: the Supabase session may still be valid even
+ * though the profile is not, and the middleware would otherwise send /login
+ * straight back here.
+ */
+function AccountProblem({
+  kind,
+  onRetry,
+}: {
+  kind: 'unauthenticated' | 'error';
+  onRetry: () => Promise<void>;
+}) {
+  const { signOut, signingOut, error } = useSignOut();
+  const [retrying, setRetrying] = useState(false);
+
+  async function retry() {
+    setRetrying(true);
+    try {
+      await onRetry();
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-6">
+      {error && (
+        <div className="mb-4">
+          <AlertBanner variant="error" message={error} />
+        </div>
+      )}
+      {kind === 'unauthenticated' ? (
+        <EmptyState
+          title="Your session has ended"
+          description="We couldn't find an active account for this session. Sign in again to continue."
+          action={
+            <Button onClick={() => void signOut()} loading={signingOut} disabled={signingOut}>
+              Sign in again
+            </Button>
+          }
+        />
+      ) : (
+        <EmptyState
+          title="We couldn't load your account"
+          description="This is usually temporary. Try again in a moment, or sign out and sign back in. If it keeps happening, contact your administrator."
+          action={
+            <div className="flex gap-3">
+              <Button onClick={() => void retry()} loading={retrying} disabled={retrying}>
+                Try again
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => void signOut()}
+                loading={signingOut}
+                disabled={signingOut}
+              >
+                Sign out
+              </Button>
+            </div>
+          }
+        />
+      )}
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const auth = useAuth();
   const summary = useDashboardSummary();
@@ -75,8 +148,8 @@ export default function DashboardPage() {
     );
   }
 
-  if (auth.status === 'unauthenticated') {
-    return null;
+  if (auth.status === 'unauthenticated' || auth.status === 'error') {
+    return <AccountProblem kind={auth.status} onRetry={auth.refresh} />;
   }
 
   const { profile, company } = auth;

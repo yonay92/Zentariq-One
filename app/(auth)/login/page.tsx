@@ -7,6 +7,27 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { AlertBanner } from '@/components/ui/AlertBanner';
 
+type SignInErrorBody = { success?: boolean; error?: { code?: string; message?: string } };
+
+const UNAVAILABLE = 'Sign-in is temporarily unavailable. Please try again in a few minutes.';
+
+/**
+ * Maps a failed /api/auth/signin response to the message shown to the user.
+ * 401, 429 and 503 messages are fixed end-user strings written by the server
+ * (wrong credentials, deactivated account, rate limit, account could not be
+ * loaded). Any other status — including a 500 or a non-JSON platform error —
+ * gets a generic retry message so internal details never surface.
+ */
+function signInErrorMessage(status: number, body: SignInErrorBody | null): string {
+  const serverMessage = body?.error?.message;
+  if (status === 401) return serverMessage ?? 'Invalid email or password';
+  if (status === 429)
+    return serverMessage ?? 'Too many sign-in attempts. Please wait and try again.';
+  if (status === 503) return serverMessage ?? UNAVAILABLE;
+  if (status === 400) return 'Enter a valid email address and password.';
+  return UNAVAILABLE;
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
@@ -26,16 +47,18 @@ export default function LoginPage() {
         body: JSON.stringify({ email, password }),
       });
 
-      const json = (await res.json()) as { success: boolean; message?: string };
+      // Error bodies are `{ success: false, error: { code, message } }`; a
+      // proxy/platform failure may not be JSON at all.
+      const json = (await res.json().catch(() => null)) as SignInErrorBody | null;
 
-      if (!res.ok || !json.success) {
-        setError(json.message ?? 'Invalid email or password');
+      if (!res.ok || json?.success !== true) {
+        setError(res.ok ? UNAVAILABLE : signInErrorMessage(res.status, json));
         return;
       }
 
       router.push('/dashboard');
     } catch {
-      setError('An unexpected error occurred. Please try again.');
+      setError('Could not reach the server. Check your connection and try again.');
     } finally {
       setLoading(false);
     }
