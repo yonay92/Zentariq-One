@@ -250,15 +250,6 @@ AND (
 )
 ```
 
-### Table Privileges
-
-RLS only filters rows for roles that already hold the table privilege. Grant
-privileges explicitly and minimally per table (migration
-`036_data_api_grants.sql`); never grant `anon` access, never grant UPDATE or
-DELETE on audit/history ledgers, and remember that `service_role` bypasses RLS
-— its grants are the only database-side limit on the admin client. See
-`docs/SUPABASE_SETUP.md` → Data API table grants.
-
 ---
 
 ## 9. API Security

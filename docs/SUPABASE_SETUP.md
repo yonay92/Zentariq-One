@@ -84,28 +84,6 @@ General policy:
 
 Users must never access another company's data.
 
-## Data API table grants
-
-RLS decides _which rows_ a role may touch; table privileges decide whether the
-role may touch the table _at all_. Supabase projects created on or after
-2026-05-30 (and new tables in older projects from 2026-10-30) no longer grant
-`anon`, `authenticated` or `service_role` any SELECT/INSERT/UPDATE/DELETE on
-`public` tables automatically — without explicit GRANTs every PostgREST query
-fails with `42501 permission denied`, even for `service_role` (which bypasses
-RLS but not privileges).
-
-Migration `036_data_api_grants.sql` defines the reviewed least-privilege
-matrix for every existing table (pinned by
-`tests/unit/migrations/dataApiGrants.test.ts`):
-
-- `anon` gets nothing — sign-in uses Supabase Auth, and unauthenticated
-  invitation reads run server-side as `service_role`.
-- `authenticated` gets only operations the application performs and an RLS
-  policy allows.
-- `service_role` gets only what the admin client and Edge Functions use.
-- Append-only ledgers (audit, history, timeline, logs, comments, notes) are
-  never granted UPDATE or DELETE.
-
 ---
 
 # 5. Storage Buckets
@@ -186,15 +164,6 @@ Suggested folders:
 /policies
 
 Never modify production schema manually.
-
-Every migration that creates a `public` table must, in the same migration:
-
-1. `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` and create its policies.
-2. `GRANT` the minimum table privileges each API role needs (see
-   [Data API table grants](#data-api-table-grants)). Never grant to `anon`
-   without an owner-reviewed requirement, never grant UPDATE/DELETE on
-   append-only records, and do not rely on `ALTER DEFAULT PRIVILEGES`.
-3. Add the table to the matrix in `tests/unit/migrations/dataApiGrants.test.ts`.
 
 ---
 
