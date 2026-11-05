@@ -6,6 +6,28 @@ import { NotFoundError, DatabaseError, PermissionDeniedError } from '@/lib/api/e
 import type { Profile, UserWithAccess } from '@/types/users';
 import type { RequestContext } from '@/types/api';
 
+// GoTrue has no "ban forever"; ~100 years, cleared again on reactivation.
+const SIGN_IN_REVOKED_BAN_DURATION = '876000h';
+
+/**
+ * Keeps Supabase Auth in step with profiles.status. A non-active account is
+ * banned, which revokes its refresh tokens and blocks new sign-ins, so a
+ * deactivated user cannot keep minting access tokens. The database already
+ * denies a non-active user all tenant data (current_company_id() is NULL,
+ * migration 037); this ends the session itself.
+ */
+async function syncSignInAccess(userId: string, status: string): Promise<void> {
+  const adminSupabase = createAdminSupabaseClient();
+  const { error } = await adminSupabase.auth.admin.updateUserById(userId, {
+    ban_duration: status === 'active' ? 'none' : SIGN_IN_REVOKED_BAN_DURATION,
+  });
+  if (error) {
+    throw new DatabaseError(
+      `Account status was saved, but sign-in access could not be updated: ${error.message}. Retry the change.`,
+    );
+  }
+}
+
 export const UserService = {
   async list(
     ctx: RequestContext,
@@ -92,6 +114,9 @@ export const UserService = {
   ): Promise<Profile> {
     // User can update own profile; admin can update any profile in company
     const isSelf = userId === ctx.user.id;
+    if (isSelf && input.status !== undefined) {
+      throw new PermissionDeniedError('Cannot change your own account status');
+    }
     if (!isSelf) {
       await PermissionService.requirePermission(ctx.user.id, 'manage_users');
     }
@@ -128,6 +153,11 @@ export const UserService = {
       old_value: old as Record<string, unknown>,
       new_value: input as Record<string, unknown>,
     });
+
+    const oldStatus = (old as { status: string }).status;
+    if (input.status !== undefined && input.status !== oldStatus) {
+      await syncSignInAccess(userId, input.status);
+    }
 
     return data as Profile;
   },
@@ -168,12 +198,33 @@ export const UserService = {
       old_value: { status: (existing as { status: string }).status },
       new_value: { status: 'inactive' },
     });
+
+    await syncSignInAccess(userId, 'inactive');
   },
 
   async assignRole(userId: string, roleId: string, ctx: RequestContext): Promise<void> {
     await PermissionService.requirePermission(ctx.user.id, 'manage_users');
 
     const supabase = await createServerSupabaseClient();
+    // Both must belong to the caller's company (also enforced by the
+    // composite foreign keys of migration 037).
+    const [{ data: role }, { data: target }] = await Promise.all([
+      supabase
+        .from('roles')
+        .select('id')
+        .eq('id', roleId)
+        .eq('company_id', ctx.company.id)
+        .maybeSingle(),
+      supabase
+        .from('profiles')
+        .select('id')
+        .eq('id', userId)
+        .eq('company_id', ctx.company.id)
+        .maybeSingle(),
+    ]);
+    if (!role) throw new NotFoundError('Role');
+    if (!target) throw new NotFoundError('User');
+
     const { error } = await supabase.from('user_roles').insert({
       company_id: ctx.company.id,
       user_id: userId,

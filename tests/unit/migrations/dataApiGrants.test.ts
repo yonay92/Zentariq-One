@@ -158,12 +158,13 @@ beforeAll(() => {
 });
 
 describe('migration 036 — file and version', () => {
-  it('is the next free migration number', () => {
+  it('has a unique migration number that directly follows 035', () => {
     const numbers = readdirSync(MIGRATIONS_DIR)
       .filter((f) => /^\d{3}_.*\.sql$/.test(f))
       .map((f) => f.slice(0, 3));
     expect(numbers.filter((n) => n === '036')).toHaveLength(1);
-    expect(Math.max(...numbers.map(Number))).toBe(36);
+    expect(numbers).toContain('035');
+    expect(new Set(numbers).size).toBe(numbers.length);
   });
 
   it('runs in a single transaction', () => {
