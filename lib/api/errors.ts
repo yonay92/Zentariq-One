@@ -38,6 +38,14 @@ export class DatabaseError extends AppError {
   }
 }
 
+// The account status change was saved, but Supabase Auth was not brought in
+// line with it. Saving the same status again retries the synchronization.
+export class SignInSyncError extends AppError {
+  constructor(message: string) {
+    super(message, 'SIGN_IN_SYNC_FAILED');
+  }
+}
+
 export class AuthError extends AppError {
   constructor(message: string) {
     super(message, 'UNAUTHORIZED');

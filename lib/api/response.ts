@@ -41,6 +41,7 @@ export function errorResponse(
     FILE_UPLOAD_FAILED: 'File upload failed',
     CONFLICT: 'Conflict with existing data',
     INTERNAL_ERROR: 'An internal error occurred',
+    SIGN_IN_SYNC_FAILED: 'The account status was saved, but sign-in access could not be updated',
   };
 
   return NextResponse.json(
