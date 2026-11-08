@@ -4,7 +4,7 @@ import { createAdminSupabaseClient } from '@/lib/supabase/admin';
 import { UserService } from '@/services/users/UserService';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
-import { DatabaseError, NotFoundError, PermissionDeniedError } from '@/lib/api/errors';
+import { NotFoundError, PermissionDeniedError, SignInSyncError } from '@/lib/api/errors';
 
 const COMPANY_ID = 'company-uuid';
 const USER_ID = 'user-uuid';
@@ -174,14 +174,124 @@ describe('UserService.update — account status', () => {
     expect(admin.updateUserById).toHaveBeenCalledWith(TARGET_ID, { ban_duration: 'none' });
   });
 
-  it('does not touch sign-in access when the status is unchanged', async () => {
+  it('re-synchronizes sign-in access when the same status is saved again (retry)', async () => {
     const client = makeSupabaseClient(
       { data: { id: TARGET_ID, full_name: 'T', phone: null, status: 'active' } },
       { data: { id: TARGET_ID, status: 'active' } },
     );
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+    const admin = makeAdminClient();
+    vi.mocked(createAdminSupabaseClient).mockReturnValue(admin.client);
 
     await UserService.update(TARGET_ID, { status: 'active', full_name: 'T2' }, makeCtx());
+
+    expect(admin.updateUserById).toHaveBeenCalledWith(TARGET_ID, { ban_duration: 'none' });
+  });
+
+  it('synchronizes to the stored status, never to the requested one', async () => {
+    const client = makeSupabaseClient(
+      { data: { id: TARGET_ID, full_name: 'T', phone: null, status: 'inactive' } },
+      { data: { id: TARGET_ID, status: 'inactive' } },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+    const admin = makeAdminClient();
+    vi.mocked(createAdminSupabaseClient).mockReturnValue(admin.client);
+
+    await UserService.update(TARGET_ID, { status: 'active' }, makeCtx());
+
+    expect(admin.updateUserById).toHaveBeenCalledWith(TARGET_ID, { ban_duration: '876000h' });
+    expect(admin.updateUserById).not.toHaveBeenCalledWith(TARGET_ID, { ban_duration: 'none' });
+  });
+
+  it('reports a failed ban explicitly after the suspension was saved and audited', async () => {
+    const client = makeSupabaseClient(
+      { data: { id: TARGET_ID, full_name: 'T', phone: null, status: 'active' } },
+      { data: { id: TARGET_ID, status: 'suspended' } },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+    const admin = makeAdminClient({ error: { message: 'auth unavailable' } });
+    vi.mocked(createAdminSupabaseClient).mockReturnValue(admin.client);
+
+    const result = UserService.update(TARGET_ID, { status: 'suspended' }, makeCtx());
+
+    await expect(result).rejects.toBeInstanceOf(SignInSyncError);
+    await expect(result).rejects.toThrow(/saved as suspended and has no data access/);
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'user.updated', record_id: TARGET_ID }),
+    );
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'user.sign_in_sync_failed',
+        record_id: TARGET_ID,
+        new_value: { status: 'suspended', sign_in: 'revoked' },
+      }),
+    );
+  });
+
+  it('reports a failed unban explicitly after the reactivation was saved', async () => {
+    const client = makeSupabaseClient(
+      { data: { id: TARGET_ID, full_name: 'T', phone: null, status: 'inactive' } },
+      { data: { id: TARGET_ID, status: 'active' } },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+    const admin = makeAdminClient({ error: { message: 'auth unavailable' } });
+    vi.mocked(createAdminSupabaseClient).mockReturnValue(admin.client);
+
+    const result = UserService.update(TARGET_ID, { status: 'active' }, makeCtx());
+
+    await expect(result).rejects.toBeInstanceOf(SignInSyncError);
+    await expect(result).rejects.toThrow(/Save the status again to retry/);
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'user.sign_in_sync_failed',
+        new_value: { status: 'active', sign_in: 'allowed' },
+      }),
+    );
+  });
+
+  it('recovers when the failed unban is retried by saving the same status again', async () => {
+    const updateUserById = vi
+      .fn()
+      .mockResolvedValueOnce({ data: {}, error: { message: 'auth unavailable' } })
+      .mockResolvedValueOnce({ data: {}, error: null });
+    vi.mocked(createAdminSupabaseClient).mockReturnValue({
+      from: vi.fn(),
+      auth: { admin: { updateUserById } },
+    } as never);
+
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient(
+        { data: { id: TARGET_ID, full_name: 'T', phone: null, status: 'inactive' } },
+        { data: { id: TARGET_ID, status: 'active' } },
+      ),
+    );
+    await expect(
+      UserService.update(TARGET_ID, { status: 'active' }, makeCtx()),
+    ).rejects.toBeInstanceOf(SignInSyncError);
+
+    // Retry: the profile is already active, the sync must still run.
+    vi.mocked(createServerSupabaseClient).mockResolvedValueOnce(
+      makeSupabaseClient(
+        { data: { id: TARGET_ID, full_name: 'T', phone: null, status: 'active' } },
+        { data: { id: TARGET_ID, status: 'active' } },
+      ),
+    );
+    await expect(
+      UserService.update(TARGET_ID, { status: 'active' }, makeCtx()),
+    ).resolves.toMatchObject({ id: TARGET_ID, status: 'active' });
+
+    expect(updateUserById).toHaveBeenCalledTimes(2);
+    expect(updateUserById).toHaveBeenNthCalledWith(2, TARGET_ID, { ban_duration: 'none' });
+  });
+
+  it('does not touch sign-in access when no status is submitted', async () => {
+    const client = makeSupabaseClient(
+      { data: { id: TARGET_ID, full_name: 'T', phone: null, status: 'inactive' } },
+      { data: { id: TARGET_ID, status: 'inactive' } },
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await UserService.update(TARGET_ID, { full_name: 'T2' }, makeCtx());
 
     expect(createAdminSupabaseClient).not.toHaveBeenCalled();
   });
@@ -217,11 +327,29 @@ describe('UserService.deactivate — session revocation', () => {
     vi.mocked(createAdminSupabaseClient).mockReturnValue(admin.client);
 
     await expect(UserService.deactivate(TARGET_ID, makeCtx())).rejects.toBeInstanceOf(
-      DatabaseError,
+      SignInSyncError,
     );
     expect(AuditService.log).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'user.deactivated' }),
     );
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'user.sign_in_sync_failed',
+        new_value: { status: 'inactive', sign_in: 'revoked' },
+      }),
+    );
+  });
+
+  it('retries the ban when an already-inactive account is deactivated again', async () => {
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: { id: TARGET_ID, full_name: 'T', status: 'inactive' } }),
+    );
+    const admin = makeAdminClient();
+    vi.mocked(createAdminSupabaseClient).mockReturnValue(admin.client);
+
+    await UserService.deactivate(TARGET_ID, makeCtx());
+
+    expect(admin.updateUserById).toHaveBeenCalledWith(TARGET_ID, { ban_duration: '876000h' });
   });
 
   it('still refuses to deactivate the caller’s own account', async () => {

@@ -22,7 +22,9 @@
 --       defeating `company_settings_update_admin`; no INSERT policy (I2).
 --   M3  15 child tables enforced company but not site isolation.
 --   M5  `document_versions` reviewer attribution, timestamps and status
---       transitions were unconstrained.
+--       transitions were unconstrained, and `regulatory_documents.status`
+--       could be set to 'current' directly without an approved version
+--       (PR #16 final audit).
 --   L1  `tasks_insert` compared `pr.company_id = company_id`, which
 --       resolves to `pr.company_id = pr.company_id` inside the subquery;
 --       `user_has_site_access()` had no company filter.
@@ -760,6 +762,167 @@ CREATE TRIGGER trg_document_history_enforce_attribution
   BEFORE INSERT ON document_history
   FOR EACH ROW EXECUTE FUNCTION enforce_document_history_attribution();
 
+-- The regulatory document "slot" carries the status the binder, the health
+-- score and the expiration checker read. Without this trigger an uploader
+-- could set it to 'current' directly while its version is still pending
+-- review, or move an approved slot to another document type or scope.
+-- For Data API callers:
+--   INSERT  starts as 'missing' or 'draft', uploaded_by is the caller, and
+--           the denormalized version fields (file, version, dates) are empty.
+--   UPDATE  identity (company, site, study, type, name, uploader, created_at)
+--           is immutable; the denormalized version fields may only be set to
+--           the current version's values. A status change needs:
+--             override_regulatory_status         any transition (manual
+--                                                override, app-audited)
+--             -> archived                        archive_regulatory_document
+--             -> pending_review (not archived)   upload_regulatory_document
+--                                                and a current version
+--                                                pending review
+--             pending_review -> current /        edit_regulatory_document and
+--               expiring_soon / expired          a current APPROVED version
+--                                                (not 'current'/'expiring_soon'
+--                                                once that version expired)
+--             pending_review -> rejected         edit_regulatory_document, no
+--                                                current version, and a version
+--                                                rejected by the caller
+--           Everything else (incl. expiry recomputation, which the
+--           regulatory-expiration-checker does as service_role) is refused.
+-- Version rows are read under the caller's RLS (company and site scoped);
+-- their reviewer attribution is enforced by trg_document_versions_enforce_integrity.
+CREATE OR REPLACE FUNCTION public.enforce_regulatory_document_integrity()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_current record;
+BEGIN
+  IF current_user NOT IN ('authenticated', 'anon') THEN
+    RETURN NEW;
+  END IF;
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'regulatory_documents: an authenticated user is required' USING ERRCODE = '42501';
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.uploaded_by IS DISTINCT FROM v_uid THEN
+      RAISE EXCEPTION 'regulatory_documents: uploaded_by must be the current user' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.status NOT IN ('missing', 'draft') THEN
+      RAISE EXCEPTION 'regulatory_documents: a new document cannot start as %', NEW.status
+        USING ERRCODE = '23514';
+    END IF;
+    IF NEW.file_id IS NOT NULL OR NEW.version IS NOT NULL
+       OR NEW.effective_date IS NOT NULL OR NEW.expiration_date IS NOT NULL THEN
+      RAISE EXCEPTION 'regulatory_documents: version fields are set from an uploaded version'
+        USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  -- UPDATE
+  IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.company_id IS DISTINCT FROM OLD.company_id
+     OR NEW.site_id IS DISTINCT FROM OLD.site_id
+     OR NEW.study_id IS DISTINCT FROM OLD.study_id
+     OR NEW.document_type_id IS DISTINCT FROM OLD.document_type_id
+     OR NEW.document_name IS DISTINCT FROM OLD.document_name
+     OR NEW.uploaded_by IS DISTINCT FROM OLD.uploaded_by
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'regulatory_documents: document identity, scope and uploader are immutable'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT dv.status, dv.file_id, dv.version, dv.effective_date, dv.expiration_date
+    INTO v_current
+    FROM document_versions dv
+   WHERE dv.document_id = OLD.id AND dv.is_current
+   LIMIT 1;
+
+  IF NEW.file_id IS DISTINCT FROM OLD.file_id
+     OR NEW.version IS DISTINCT FROM OLD.version
+     OR NEW.effective_date IS DISTINCT FROM OLD.effective_date
+     OR NEW.expiration_date IS DISTINCT FROM OLD.expiration_date THEN
+    IF v_current.status IS NULL
+       OR NEW.file_id IS DISTINCT FROM v_current.file_id
+       OR NEW.version IS DISTINCT FROM v_current.version
+       OR NEW.effective_date IS DISTINCT FROM v_current.effective_date
+       OR NEW.expiration_date IS DISTINCT FROM v_current.expiration_date THEN
+      RAISE EXCEPTION 'regulatory_documents: file, version and dates must match the current version'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  IF NEW.status IS NOT DISTINCT FROM OLD.status OR has_permission('override_regulatory_status') THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW.status = 'archived' THEN
+    IF NOT has_permission('archive_regulatory_document') THEN
+      RAISE EXCEPTION 'regulatory_documents: archive_regulatory_document is required to archive'
+        USING ERRCODE = '42501';
+    END IF;
+  ELSIF NEW.status = 'pending_review' THEN
+    IF OLD.status = 'archived' THEN
+      RAISE EXCEPTION 'regulatory_documents: an archived document cannot be resubmitted'
+        USING ERRCODE = '23514';
+    END IF;
+    IF NOT has_permission('upload_regulatory_document') THEN
+      RAISE EXCEPTION 'regulatory_documents: upload_regulatory_document is required to submit'
+        USING ERRCODE = '42501';
+    END IF;
+    IF v_current.status IS DISTINCT FROM 'pending_review' THEN
+      RAISE EXCEPTION 'regulatory_documents: submitting for review requires a current version pending review'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSIF NEW.status IN ('current', 'expiring_soon', 'expired') THEN
+    IF OLD.status <> 'pending_review' THEN
+      RAISE EXCEPTION 'regulatory_documents: invalid status transition % -> %', OLD.status, NEW.status
+        USING ERRCODE = '23514';
+    END IF;
+    IF NOT has_permission('edit_regulatory_document') THEN
+      RAISE EXCEPTION 'regulatory_documents: edit_regulatory_document is required to approve'
+        USING ERRCODE = '42501';
+    END IF;
+    IF v_current.status IS DISTINCT FROM 'approved' THEN
+      RAISE EXCEPTION 'regulatory_documents: % requires an approved current version', NEW.status
+        USING ERRCODE = '23514';
+    END IF;
+    -- One day of tolerance for the application's local-midnight date math.
+    IF NEW.status <> 'expired' AND v_current.expiration_date < current_date - 1 THEN
+      RAISE EXCEPTION 'regulatory_documents: the approved version has expired'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSIF NEW.status = 'rejected' THEN
+    IF OLD.status <> 'pending_review' THEN
+      RAISE EXCEPTION 'regulatory_documents: invalid status transition % -> %', OLD.status, NEW.status
+        USING ERRCODE = '23514';
+    END IF;
+    IF NOT has_permission('edit_regulatory_document') THEN
+      RAISE EXCEPTION 'regulatory_documents: edit_regulatory_document is required to reject'
+        USING ERRCODE = '42501';
+    END IF;
+    IF v_current.status IS NOT NULL OR NOT EXISTS (
+      SELECT 1 FROM document_versions dv
+      WHERE dv.document_id = OLD.id AND dv.status = 'rejected' AND dv.reviewed_by = v_uid
+    ) THEN
+      RAISE EXCEPTION 'regulatory_documents: rejecting requires a version rejected by the current user'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'regulatory_documents: invalid status transition % -> %', OLD.status, NEW.status
+      USING ERRCODE = '23514';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_regulatory_documents_enforce_integrity
+  BEFORE INSERT OR UPDATE ON regulatory_documents
+  FOR EACH ROW EXECUTE FUNCTION enforce_regulatory_document_integrity();
+
 -- ------------------------------------------------------------
 -- 6. L1 — tasks_insert assignee company check
 -- ------------------------------------------------------------
@@ -815,7 +978,8 @@ REVOKE ALL ON FUNCTION
   public.record_task_reassignment_history(),
   public.enforce_profile_update_integrity(),
   public.enforce_document_version_integrity(),
-  public.enforce_document_history_attribution()
+  public.enforce_document_history_attribution(),
+  public.enforce_regulatory_document_integrity()
 FROM PUBLIC, anon;
 
 GRANT EXECUTE ON FUNCTION
@@ -837,7 +1001,7 @@ COMMIT;
 
 -- ROLLBACK GUIDANCE (manual, owner-approved only): restore the previous
 -- definitions of the five helper functions and the altered policies from
--- migrations 001–035 (they are recreated verbatim there), DROP the three
+-- migrations 001–035 (they are recreated verbatim there), DROP the four
 -- triggers and their functions, the six can_access_* helpers, policy
 -- profiles_select_own and company_settings_insert_admin; re-create the five
 -- single-column FKs (role_permissions/user_roles role_id, user_roles/

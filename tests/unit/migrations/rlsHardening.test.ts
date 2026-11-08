@@ -291,6 +291,33 @@ describe('migration 037 — M5 document review integrity', () => {
     expect(fn).toContain('NEW.changed_by := auth.uid();');
     expect(fn).toContain('NEW.changed_at := now();');
   });
+
+  it('ties every regulatory document status change to its permission and version workflow', () => {
+    const fn = functionBody('enforce_regulatory_document_integrity');
+    expect(fn).toContain("IF current_user NOT IN ('authenticated', 'anon') THEN");
+    // INSERT: starts unreviewed, attributed to the caller, with no version data.
+    expect(fn).toContain("IF NEW.status NOT IN ('missing', 'draft') THEN");
+    expect(fn).toContain('uploaded_by must be the current user');
+    // UPDATE: identity and scope immutable; denormalized fields mirror the current version.
+    for (const col of ['company_id', 'site_id', 'study_id', 'document_type_id', 'uploaded_by']) {
+      expect(fn).toContain(`NEW.${col} IS DISTINCT FROM OLD.${col}`);
+    }
+    expect(fn).toContain('must match the current version');
+    expect(fn).toContain("has_permission('override_regulatory_status')");
+    expect(fn).toContain("has_permission('archive_regulatory_document')");
+    expect(fn).toContain("has_permission('upload_regulatory_document')");
+    expect(fn).toContain("v_current.status IS DISTINCT FROM 'pending_review'");
+    // Approval needs an approved current version and edit_regulatory_document.
+    expect(fn).toContain("ELSIF NEW.status IN ('current', 'expiring_soon', 'expired') THEN");
+    expect(fn).toContain("v_current.status IS DISTINCT FROM 'approved'");
+    expect(fn).toContain("has_permission('edit_regulatory_document')");
+    expect(fn).toContain("dv.status = 'rejected' AND dv.reviewed_by = v_uid");
+    // Anything else (e.g. expiry recomputation) is refused for Data API callers.
+    expect(fn).toMatch(/ELSE\s+RAISE EXCEPTION 'regulatory_documents: invalid status transition/);
+    expect(body).toMatch(
+      /CREATE TRIGGER trg_regulatory_documents_enforce_integrity\s+BEFORE INSERT OR UPDATE ON regulatory_documents/,
+    );
+  });
 });
 
 describe('migration 037 — L1 / L2 / L5', () => {

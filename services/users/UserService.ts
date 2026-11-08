@@ -2,7 +2,13 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { createAdminSupabaseClient } from '@/lib/supabase/admin';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
-import { NotFoundError, DatabaseError, PermissionDeniedError } from '@/lib/api/errors';
+import {
+  NotFoundError,
+  DatabaseError,
+  PermissionDeniedError,
+  SignInSyncError,
+} from '@/lib/api/errors';
+import { logger } from '@/lib/logger';
 import type { Profile, UserWithAccess } from '@/types/users';
 import type { RequestContext } from '@/types/api';
 
@@ -10,22 +16,48 @@ import type { RequestContext } from '@/types/api';
 const SIGN_IN_REVOKED_BAN_DURATION = '876000h';
 
 /**
- * Keeps Supabase Auth in step with profiles.status. A non-active account is
- * banned, which revokes its refresh tokens and blocks new sign-ins, so a
- * deactivated user cannot keep minting access tokens. The database already
- * denies a non-active user all tenant data (current_company_id() is NULL,
- * migration 037); this ends the session itself.
+ * Keeps Supabase Auth in step with the STORED profiles.status. A non-active
+ * account is banned, which revokes its refresh tokens and blocks new
+ * sign-ins, so a deactivated user cannot keep minting access tokens. The
+ * database already denies a non-active user all tenant data
+ * (current_company_id() is NULL, migration 037); this ends the session itself.
+ *
+ * Idempotent, so callers run it on every explicit status save: repeating the
+ * save is how an administrator retries a failed synchronization. A failure
+ * leaves the profile saved; it is logged, audited and reported as
+ * SignInSyncError so it is never silent.
  */
-async function syncSignInAccess(userId: string, status: string): Promise<void> {
+async function syncSignInAccess(
+  userId: string,
+  storedStatus: string,
+  ctx: RequestContext,
+): Promise<void> {
+  const signInAllowed = storedStatus === 'active';
   const adminSupabase = createAdminSupabaseClient();
   const { error } = await adminSupabase.auth.admin.updateUserById(userId, {
-    ban_duration: status === 'active' ? 'none' : SIGN_IN_REVOKED_BAN_DURATION,
+    ban_duration: signInAllowed ? 'none' : SIGN_IN_REVOKED_BAN_DURATION,
   });
-  if (error) {
-    throw new DatabaseError(
-      `Account status was saved, but sign-in access could not be updated: ${error.message}. Retry the change.`,
-    );
-  }
+  if (!error) return;
+
+  logger.error('UserService.syncSignInAccess failed', {
+    userId,
+    storedStatus,
+    error: error.message,
+  });
+  await AuditService.log({
+    company_id: ctx.company.id,
+    user_id: ctx.user.id,
+    action: 'user.sign_in_sync_failed',
+    module: 'users',
+    record_type: 'profiles',
+    record_id: userId,
+    new_value: { status: storedStatus, sign_in: signInAllowed ? 'allowed' : 'revoked' },
+  });
+  throw new SignInSyncError(
+    signInAllowed
+      ? 'The account was saved as active, but sign-in could not be re-enabled. Save the status again to retry.'
+      : `The account was saved as ${storedStatus} and has no data access, but its sessions could not be revoked. Save the status again to retry.`,
+  );
 }
 
 export const UserService = {
@@ -154,9 +186,10 @@ export const UserService = {
       new_value: input as Record<string, unknown>,
     });
 
-    const oldStatus = (old as { status: string }).status;
-    if (input.status !== undefined && input.status !== oldStatus) {
-      await syncSignInAccess(userId, input.status);
+    // Synchronize to the status actually stored, also when it is unchanged,
+    // so saving the same status again retries a previously failed sync.
+    if (input.status !== undefined) {
+      await syncSignInAccess(userId, (data as Profile).status, ctx);
     }
 
     return data as Profile;
@@ -199,7 +232,7 @@ export const UserService = {
       new_value: { status: 'inactive' },
     });
 
-    await syncSignInAccess(userId, 'inactive');
+    await syncSignInAccess(userId, 'inactive', ctx);
   },
 
   async assignRole(userId: string, roleId: string, ctx: RequestContext): Promise<void> {
