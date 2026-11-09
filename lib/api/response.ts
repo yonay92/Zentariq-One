@@ -40,6 +40,8 @@ export function errorResponse(
     AI_REVIEW_REQUIRED: 'AI response requires review before applying',
     FILE_UPLOAD_FAILED: 'File upload failed',
     CONFLICT: 'Conflict with existing data',
+    RATE_LIMITED: 'Too many requests. Please wait and try again.',
+    SERVICE_UNAVAILABLE: 'The service is temporarily unavailable. Please try again later.',
     INTERNAL_ERROR: 'An internal error occurred',
     SIGN_IN_SYNC_FAILED: 'The account status was saved, but sign-in access could not be updated',
   };
