@@ -93,6 +93,15 @@ export type ChartComment = {
   created_at: string;
 };
 
+// G8 M038 — the response of POST /api/charts/[id]/comments. Every field except
+// created_at is the value stored for the new comment. created_at is the
+// database's own timestamp when the caller may read chart comments
+// (view_charts), and null otherwise (comment_chart alone does not grant reading
+// them back); the application never substitutes its own clock.
+export type AddedChartComment = Omit<ChartComment, 'created_at'> & {
+  created_at: string | null;
+};
+
 export type AddChartCommentInput = {
   comment: string;
 };

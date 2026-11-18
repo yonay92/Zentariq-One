@@ -44,6 +44,14 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     Object.entries(validated.data).filter(([, v]) => v !== undefined),
   ) as Parameters<typeof SubjectService.update>[1];
 
+  // An empty body, or one whose keys were all stripped (site_id, study_id,
+  // company_id and any other non-editable field), has nothing to update.
+  if (Object.keys(input).length === 0) {
+    return errorResponse('VALIDATION_ERROR', 400, {
+      message: `Provide at least one field to update: ${Object.keys(updateSubjectSchema.shape).join(', ')}`,
+    });
+  }
+
   try {
     const subject = await SubjectService.update(id, input, {
       user: auth.user,
