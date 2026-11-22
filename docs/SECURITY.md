@@ -259,6 +259,71 @@ DELETE on audit/history ledgers, and remember that `service_role` bypasses RLS
 — its grants are the only database-side limit on the admin client. See
 `docs/SUPABASE_SETUP.md` → Data API table grants.
 
+### Workflow Invariants (migration 039)
+
+RLS decides who may touch a row; it cannot express state machines. The
+service-layer workflow rules are therefore also enforced by BEFORE triggers,
+so a signed-in user calling the Data API directly cannot skip them:
+
+- Status transitions of subjects, visits, charts and visit templates, each
+  with the permission the service requires (table
+  `private.workflow_transitions`, kept in parity with the TypeScript maps by
+  `tests/unit/migrations/workflowInvariants.test.ts`).
+- Creation preconditions (subject: active study, assigned site, approved
+  template; records start in their initial status), immutable subject number,
+  randomization details, visit sequence and window (BUSINESS_RULES_04),
+  draft-only template items, study activation/archiving permissions, and
+  lead conversion only through Convert to Subject.
+- Visit integrity (BUSINESS_RULES_04 → Visit Integrity): immutable visit
+  identity, one visit per subject and template visit (unique index, all
+  roles), template visits only from the study's approved template, dates and
+  window derived from the template, the visit date only while In Progress,
+  and a baseline date that matches the completed baseline visit. Without
+  these, re-pointing a visit, fabricating a predecessor or widening a window
+  would bypass the sequence and O-1.
+- No oracle before authorization: BEFORE triggers run before an INSERT's RLS
+  WITH CHECK, so every INSERT check that reads other rows (subjects, visits,
+  charts, visit_template_items, visit_sequence_exceptions) first applies the
+  table's own INSERT policy and answers exactly like RLS (42501, same
+  message). The sequence-exception lookup and its row lock only reach a visit
+  of the caller's company, authorized site, subject and site; a missing visit
+  and another site's visit give the same answer.
+- The triggers act only for the Data API roles (`authenticated`, `anon`).
+  `service_role`, migrations and SECURITY DEFINER functions are not
+  restricted, so every future SECURITY DEFINER RPC must validate the same
+  rules itself (with the `private.*` helpers).
+- A rule violation raises SQLSTATE 23514 (or 42501 for a missing permission).
+  The services map 23514 to `ConflictError` and the routes answer **HTTP
+  409** with the rule text (`databaseWriteError` in `lib/api/errors.ts`).
+- Kept as the application behaves, by owner decision (E1): study status
+  leniency (Obs-1) and subject creation at inactive study sites (Obs-2).
+- Leads leaving a closed status (Obs-3, decided by the owner): a closed lead
+  that was not converted may be reopened only with authorization, a mandatory
+  reason and an audit entry; a `converted` lead cannot be reopened through the
+  ordinary flow. Enforcement belongs to migration 044; until then
+  `LeadService.changeStatus` keeps its current behaviour (a reason is
+  required), which differs from BUSINESS_RULES_13. No owner decision is
+  pending on Obs-1, Obs-2 or Obs-3.
+
+### The `private` schema
+
+Helper functions and the transition table live in the schema `private`:
+`PUBLIC`/`anon` have no privilege on it, `authenticated` has USAGE and EXECUTE
+on the helpers only, and every helper checks the caller's company and site
+itself and returns only fixed rule texts or booleans.
+
+The schema must **never** be added to the Data API's exposed schemas. The
+in-database setting alone does not prove this; before and after every hosted
+apply that touches `private`, verify (read-only):
+
+1. Project Settings → Data API → Exposed schemas does not list `private`.
+2. A GET to the Data API with `Accept-Profile: private` answers **406
+   `PGRST106`** ("Invalid schema: private"; the `hint` lists the exposed
+   schemas), while the same request with `Accept-Profile: public` answers 404
+   `PGRST205`.
+
+Repeat check 2 after any change to the exposed schemas.
+
 ---
 
 ## 9. API Security

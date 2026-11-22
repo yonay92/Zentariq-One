@@ -2,7 +2,12 @@ import { type NextRequest } from 'next/server';
 import { resolveAuthContext } from '@/lib/api/middleware';
 import { successResponse, errorResponse } from '@/lib/api/response';
 import { ChartService } from '@/services/charts/ChartService';
-import { PermissionDeniedError, NotFoundError, BusinessRuleError } from '@/lib/api/errors';
+import {
+  PermissionDeniedError,
+  NotFoundError,
+  BusinessRuleError,
+  ConflictError,
+} from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -15,6 +20,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const chart = await ChartService.holdChart(id, { user: auth.user, company: auth.company });
     return successResponse(chart, 'Chart put on hold');
   } catch (error) {
+    if (error instanceof ConflictError) {
+      return errorResponse('CONFLICT', 409, { message: error.message });
+    }
     if (error instanceof PermissionDeniedError) return errorResponse('FORBIDDEN', 403);
     if (error instanceof NotFoundError) return errorResponse('NOT_FOUND', 404);
     if (error instanceof BusinessRuleError) {

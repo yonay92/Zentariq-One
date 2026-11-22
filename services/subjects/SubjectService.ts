@@ -11,6 +11,7 @@ import {
   DatabaseError,
   BusinessRuleError,
   DuplicateRecordError,
+  databaseWriteError,
 } from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 import type {
@@ -76,7 +77,7 @@ const TERMINAL_STATUSES: SubjectStatus[] = [
   'lost_to_follow_up',
 ];
 
-function isValidStatusTransition(from: SubjectStatus, to: SubjectStatus): boolean {
+export function isValidStatusTransition(from: SubjectStatus, to: SubjectStatus): boolean {
   if (from === to) return false;
   if (TERMINAL_STATUSES.includes(from)) return false;
 
@@ -88,6 +89,24 @@ function isValidStatusTransition(from: SubjectStatus, to: SubjectStatus): boolea
   const fromIndex = FORWARD_FLOW.indexOf(from);
   const toIndex = FORWARD_FLOW.indexOf(to);
   return fromIndex !== -1 && toIndex === fromIndex + 1;
+}
+
+// Owner decision M4-D5 (migration 039): an open, authorized sequence exception
+// (VisitService.authorizeSequenceException) lets a locked visit be completed
+// once. The database re-checks the sequence and consumes the exception
+// atomically when the visit is completed, so this read only decides whether
+// to attempt the completion. Fails closed if the exception cannot be read.
+async function hasOpenSequenceException(visitId: string, companyId: string): Promise<boolean> {
+  const supabase = await createServerSupabaseClient();
+  const { data, error } = await supabase
+    .from('visit_sequence_exceptions')
+    .select('id')
+    .eq('visit_id', visitId)
+    .eq('company_id', companyId)
+    .is('consumed_at', null)
+    .maybeSingle();
+  if (error) throw new DatabaseError(error.message);
+  return data !== null;
 }
 
 function addDaysToDateString(dateStr: string, days: number): string {
@@ -258,7 +277,7 @@ export const SubjectService = {
       if ((error as { code?: string } | null)?.code === '23505') {
         throw new DuplicateRecordError('subject_number');
       }
-      throw new DatabaseError(error?.message ?? 'Failed to create subject');
+      throw databaseWriteError(error, 'Failed to create subject');
     }
 
     const subject = data as Subject;
@@ -314,7 +333,7 @@ export const SubjectService = {
         created_by: ctx.user.id,
       })),
     );
-    if (visitError) throw new DatabaseError(visitError.message);
+    if (visitError) throw databaseWriteError(visitError, 'Failed to create visits');
 
     const { data: createdVisits } = await supabase
       .from('visits')
@@ -604,7 +623,9 @@ export const SubjectService = {
     }
 
     const lockStatus = getVisitLockStatus(baselineVisit, allVisits, templateItems);
-    if (lockStatus.locked) {
+    const usesSequenceException =
+      lockStatus.locked && (await hasOpenSequenceException(baselineVisit.id, ctx.company.id));
+    if (lockStatus.locked && !usesSequenceException) {
       throw new BusinessRuleError(lockStatus.reason);
     }
 
@@ -684,7 +705,7 @@ export const SubjectService = {
       module: 'subjects',
       record_type: 'subjects',
       record_id: subjectId,
-      new_value: { baseline_date: input.baseline_date },
+      new_value: { baseline_date: input.baseline_date, sequence_exception: usesSequenceException },
     });
 
     return result;
@@ -736,7 +757,9 @@ export const SubjectService = {
     }
 
     const lockStatus = getVisitLockStatus(visit, allVisits, templateItems);
-    if (lockStatus.locked) {
+    const usesSequenceException =
+      lockStatus.locked && (await hasOpenSequenceException(visit.id, ctx.company.id));
+    if (lockStatus.locked && !usesSequenceException) {
       throw new BusinessRuleError(lockStatus.reason);
     }
 
@@ -809,7 +832,11 @@ export const SubjectService = {
       module: 'subjects',
       record_type: 'visits',
       record_id: visitId,
-      new_value: { status: finalStatus, scheduled_date: input.scheduled_date },
+      new_value: {
+        status: finalStatus,
+        scheduled_date: input.scheduled_date,
+        sequence_exception: usesSequenceException,
+      },
     });
 
     if (isOutOfWindow) {
@@ -865,7 +892,7 @@ export const SubjectService = {
       .single();
 
     if (error || !updated) {
-      throw new DatabaseError(error?.message ?? 'Failed to randomize subject');
+      throw databaseWriteError(error, 'Failed to randomize subject');
     }
 
     const result = updated as Subject;
@@ -946,7 +973,7 @@ export const SubjectService = {
       .single();
 
     if (error || !updated) {
-      throw new DatabaseError(error?.message ?? 'Failed to update subject status');
+      throw databaseWriteError(error, 'Failed to update subject status');
     }
 
     // GAP-DUP-01: write structured history + narrative timeline + immutable audit log — all three.

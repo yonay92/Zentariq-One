@@ -69,7 +69,8 @@ DECLARE
     'override_regulatory_status',
     'override_do_not_contact',
     'reopen_recruitment_tasks',
-    'reopen_chart'
+    'reopen_chart',
+    'override_visit_sequence'
   ];
 
   v_company_name    text := current_setting('zentariq.bootstrap_company_name', true);

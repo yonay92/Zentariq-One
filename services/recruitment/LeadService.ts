@@ -4,7 +4,12 @@ import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { SubjectService } from '@/services/subjects/SubjectService';
 import { LeadDuplicateService } from '@/services/recruitment/LeadDuplicateService';
-import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
+import {
+  NotFoundError,
+  DatabaseError,
+  BusinessRuleError,
+  databaseWriteError,
+} from '@/lib/api/errors';
 import { PIPELINE_COLUMN_ORDER, getPipelineColumnForStatus } from '@/lib/utils/leadPipelineColumns';
 import type {
   Lead,
@@ -74,7 +79,7 @@ const STATUS_HISTORY_COLUMNS =
 // (for 'converted' specifically) never reachable through changeStatus at
 // all — only LeadService.convertToSubject may set it, so converted_subject_id
 // and the eligibility/PHI preconditions it enforces can never be bypassed.
-const TERMINAL_STATUSES: LeadStatus[] = [
+export const TERMINAL_STATUSES: LeadStatus[] = [
   'converted',
   'declined',
   'lost',
@@ -90,7 +95,7 @@ const TERMINAL_STATUSES: LeadStatus[] = [
 // transitions only with a required reason and audit entry." 'converted' is
 // deliberately never a value in this map; it is excluded as a target in
 // changeStatus regardless of reason.
-const STATUS_TRANSITIONS: Partial<Record<LeadStatus, LeadStatus[]>> = {
+export const STATUS_TRANSITIONS: Partial<Record<LeadStatus, LeadStatus[]>> = {
   new: ['contact_attempted', 'contacted', 'not_interested', 'lost'],
   contact_attempted: ['contacted', 'voicemail_left', 'not_interested', 'lost'],
   voicemail_left: ['contacted', 'contact_attempted', 'not_interested', 'lost'],
@@ -208,7 +213,7 @@ export const LeadService = {
       .select(LEAD_COLUMNS)
       .single();
 
-    if (error || !data) throw new DatabaseError(error?.message ?? 'Failed to create lead');
+    if (error || !data) throw databaseWriteError(error, 'Failed to create lead');
 
     const lead = data as Lead;
 
@@ -513,7 +518,7 @@ export const LeadService = {
       .select(LEAD_COLUMNS)
       .single();
 
-    if (error || !data) throw new DatabaseError(error?.message ?? 'Failed to change lead status');
+    if (error || !data) throw databaseWriteError(error, 'Failed to change lead status');
 
     await insertStatusHistory(supabase, {
       company_id: ctx.company.id,
@@ -588,7 +593,7 @@ export const LeadService = {
       .select(LEAD_COLUMNS)
       .single();
 
-    if (error || !data) throw new DatabaseError(error?.message ?? 'Failed to log contact attempt');
+    if (error || !data) throw databaseWriteError(error, 'Failed to log contact attempt');
 
     await supabase.from('lead_contact_log').insert({
       company_id: ctx.company.id,
@@ -644,7 +649,7 @@ export const LeadService = {
       .select(LEAD_COLUMNS)
       .single();
 
-    if (error || !data) throw new DatabaseError(error?.message ?? 'Failed to waitlist lead');
+    if (error || !data) throw databaseWriteError(error, 'Failed to waitlist lead');
 
     await insertStatusHistory(supabase, {
       company_id: ctx.company.id,
@@ -683,7 +688,7 @@ export const LeadService = {
       .select(LEAD_COLUMNS)
       .single();
 
-    if (error || !data) throw new DatabaseError(error?.message ?? 'Failed to decline lead');
+    if (error || !data) throw databaseWriteError(error, 'Failed to decline lead');
 
     await insertStatusHistory(supabase, {
       company_id: ctx.company.id,
@@ -1210,9 +1215,7 @@ export const LeadService = {
       .single();
 
     if (leadError || !updatedLead) {
-      throw new DatabaseError(
-        leadError?.message ?? 'Subject created, but updating the lead failed',
-      );
+      throw databaseWriteError(leadError, 'Subject created, but updating the lead failed');
     }
 
     await insertStatusHistory(supabase, {

@@ -37,6 +37,29 @@ export type ReopenVisitInput = {
   reason: string;
 };
 
+export type AuthorizeVisitSequenceExceptionInput = {
+  reason: string;
+};
+
+// visit_sequence_exceptions (migration 039, owner decision M4-D5). One open
+// exception per visit; the database derives blocked_by, authorized_by and
+// authorized_at, and consumes the exception when the visit is completed.
+export type VisitSequenceException = {
+  id: string;
+  company_id: string;
+  site_id: string;
+  subject_id: string;
+  visit_id: string;
+  reason: string;
+  // Names of the required earlier visits that were pending when the
+  // exception was recorded. null when the row could not be read back.
+  blocked_by: string[] | null;
+  authorized_by: string;
+  authorized_at: string | null;
+  consumed_at: string | null;
+  consumed_status: 'completed' | 'out_of_window' | null;
+};
+
 export type CreateUnscheduledVisitInput = {
   visit_name: string;
   target_date: string;

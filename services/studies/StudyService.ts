@@ -5,7 +5,12 @@ import { AuditService } from '@/services/audit/AuditService';
 import { NotificationService } from '@/services/notifications/NotificationService';
 import { VisitTemplateService } from '@/services/visit-templates/VisitTemplateService';
 import { FileService } from '@/services/files/FileService';
-import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
+import {
+  NotFoundError,
+  DatabaseError,
+  BusinessRuleError,
+  databaseWriteError,
+} from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 import type {
   Study,
@@ -175,7 +180,7 @@ export const StudyService = {
       .select(STUDY_COLUMNS)
       .single();
 
-    if (error || !data) throw new DatabaseError(error?.message ?? 'Failed to create study');
+    if (error || !data) throw databaseWriteError(error, 'Failed to create study');
 
     await AuditService.log({
       company_id: ctx.company.id,
@@ -551,7 +556,7 @@ export const StudyService = {
       .select(STUDY_COLUMNS)
       .single();
 
-    if (error || !updated) throw new DatabaseError(error?.message ?? 'Failed to activate study');
+    if (error || !updated) throw databaseWriteError(error, 'Failed to activate study');
 
     // GAP-BL-05: auto-populate study_document_requirements from document_types.required_by_default.
     // Implemented as a plain synchronous step here — revisit via the Business Rule Engine (Sprint 9).
@@ -819,7 +824,7 @@ export const StudyService = {
       .select(STUDY_COLUMNS)
       .single();
 
-    if (error || !updated) throw new DatabaseError(error?.message ?? 'Failed to close study');
+    if (error || !updated) throw databaseWriteError(error, 'Failed to close study');
 
     await AuditService.log({
       company_id: ctx.company.id,
@@ -863,7 +868,7 @@ export const StudyService = {
       .select(STUDY_COLUMNS)
       .single();
 
-    if (error || !updated) throw new DatabaseError(error?.message ?? 'Failed to archive study');
+    if (error || !updated) throw databaseWriteError(error, 'Failed to archive study');
 
     await AuditService.log({
       company_id: ctx.company.id,
@@ -943,7 +948,7 @@ export const StudyService = {
           .single();
 
         if (error || !updated) {
-          throw new DatabaseError(error?.message ?? 'Failed to update study status');
+          throw databaseWriteError(error, 'Failed to update study status');
         }
 
         await AuditService.log({

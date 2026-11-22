@@ -8,6 +8,7 @@ import {
   NotFoundError,
   BusinessRuleError,
   DuplicateRecordError,
+  ConflictError,
 } from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 import type { SubjectStatus } from '@/types/subjects';
@@ -61,6 +62,9 @@ export async function POST(request: NextRequest) {
     });
     return successResponse(subject, 'Subject created', 201);
   } catch (error) {
+    if (error instanceof ConflictError) {
+      return errorResponse('CONFLICT', 409, { message: error.message });
+    }
     if (error instanceof PermissionDeniedError) return errorResponse('FORBIDDEN', 403);
     if (error instanceof NotFoundError) return errorResponse('NOT_FOUND', 404);
     if (error instanceof DuplicateRecordError) return errorResponse('DUPLICATE_RECORD', 409);

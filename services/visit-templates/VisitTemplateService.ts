@@ -1,7 +1,12 @@
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
-import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
+import {
+  NotFoundError,
+  DatabaseError,
+  BusinessRuleError,
+  databaseWriteError,
+} from '@/lib/api/errors';
 import type {
   VisitTemplate,
   VisitTemplateItem,
@@ -127,7 +132,7 @@ export const VisitTemplateService = {
       .single();
 
     if (error || !template) {
-      throw new DatabaseError(error?.message ?? 'Failed to create visit template');
+      throw databaseWriteError(error, 'Failed to create visit template');
     }
 
     const templateId = (template as VisitTemplate).id;
@@ -152,7 +157,7 @@ export const VisitTemplateService = {
       .select(ITEM_COLUMNS);
 
     if (itemsError) {
-      throw new DatabaseError(itemsError.message);
+      throw databaseWriteError(itemsError, 'Failed to create visit template items');
     }
 
     await AuditService.log({
@@ -205,7 +210,7 @@ export const VisitTemplateService = {
       .select(TEMPLATE_COLUMNS)
       .single();
 
-    if (error || !updated) throw new DatabaseError(error?.message ?? 'Failed to approve template');
+    if (error || !updated) throw databaseWriteError(error, 'Failed to approve template');
 
     await AuditService.log({
       company_id: ctx.company.id,
@@ -240,7 +245,7 @@ export const VisitTemplateService = {
       .select(TEMPLATE_COLUMNS)
       .single();
 
-    if (error || !updated) throw new DatabaseError(error?.message ?? 'Failed to archive template');
+    if (error || !updated) throw databaseWriteError(error, 'Failed to archive template');
 
     await AuditService.log({
       company_id: ctx.company.id,

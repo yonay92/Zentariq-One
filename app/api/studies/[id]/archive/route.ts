@@ -3,7 +3,12 @@ import { resolveAuthContext } from '@/lib/api/middleware';
 import { successResponse, errorResponse } from '@/lib/api/response';
 import { archiveStudySchema } from '@/lib/utils/validation';
 import { StudyService } from '@/services/studies/StudyService';
-import { PermissionDeniedError, NotFoundError, BusinessRuleError } from '@/lib/api/errors';
+import {
+  PermissionDeniedError,
+  NotFoundError,
+  BusinessRuleError,
+  ConflictError,
+} from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -29,6 +34,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     );
     return successResponse(study, 'Study archived');
   } catch (error) {
+    if (error instanceof ConflictError) {
+      return errorResponse('CONFLICT', 409, { message: error.message });
+    }
     if (error instanceof PermissionDeniedError) return errorResponse('FORBIDDEN', 403);
     if (error instanceof NotFoundError) return errorResponse('NOT_FOUND', 404);
     if (error instanceof BusinessRuleError) {

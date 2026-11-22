@@ -67,13 +67,25 @@ function queryStub(data: unknown, error: unknown = null) {
     update: vi.fn().mockReturnThis(),
     upsert: vi.fn().mockReturnThis(),
     in: vi.fn().mockReturnThis(),
+    is: vi.fn().mockReturnThis(),
     maybeSingle: vi.fn().mockResolvedValue({ data, error }),
     single: vi.fn().mockResolvedValue({ data, error }),
     then: resolved.then.bind(resolved),
     catch: resolved.catch.bind(resolved),
     finally: resolved.finally.bind(resolved),
   };
-  for (const key of ['select', 'eq', 'or', 'order', 'limit', 'insert', 'update', 'upsert', 'in']) {
+  for (const key of [
+    'select',
+    'eq',
+    'or',
+    'order',
+    'limit',
+    'insert',
+    'update',
+    'upsert',
+    'in',
+    'is',
+  ]) {
     (stub[key] as ReturnType<typeof vi.fn>).mockReturnValue(stub);
   }
   return stub;
@@ -519,6 +531,7 @@ describe('SubjectService.completeBaselineVisit', () => {
       { data: { id: 'template-uuid' } }, // visit_templates lookup
       { data: [screeningItem, baselineItem] }, // visit_template_items
       { data: [screeningVisit, baselineVisit] }, // visits
+      { data: null }, // visit_sequence_exceptions lookup (039): no open exception
     );
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
@@ -814,12 +827,85 @@ describe('SubjectService.completeVisit', () => {
       { data: { id: 'template-uuid' } }, // visit_templates lookup
       { data: [baselineItem, week4Item] }, // visit_template_items
       { data: [baselineVisit, week4Visit] }, // visits (all)
+      { data: null }, // visit_sequence_exceptions lookup (039): no open exception
     );
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
     await expect(
       SubjectService.completeVisit(SUBJECT_ID, VISIT_ID, COMPLETE_INPUT, makeCtx()),
     ).rejects.toThrow(BusinessRuleError);
+    expect(ChartService.ensureChartForCompletedVisit).not.toHaveBeenCalled();
+  });
+
+  // Owner decision M4-D5 (039): an open, authorized sequence exception lets a
+  // locked visit be completed; the database consumes it inside the RPC.
+  it('completes a locked visit when an open sequence exception exists, and audits its use', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+
+    const baselineItem = {
+      id: 'item-baseline',
+      template_id: 'template-uuid',
+      visit_name: 'Baseline',
+      visit_order: 1,
+      is_required: true,
+      is_baseline: true,
+    };
+    const week4Item = {
+      id: 'item-week4',
+      template_id: 'template-uuid',
+      visit_name: 'Week 4',
+      visit_order: 2,
+      is_required: true,
+      is_baseline: false,
+    };
+    const week4Visit = {
+      id: VISIT_ID,
+      status: 'in_progress',
+      visit_name: 'Week 4',
+      visit_template_item_id: week4Item.id,
+    };
+    const baselineVisit = {
+      id: 'visit-baseline',
+      status: 'scheduled', // still pending: Week 4 is locked
+      visit_template_item_id: baselineItem.id,
+    };
+    mockEnsureChart({ ...week4Visit, status: 'completed' });
+
+    const client = makeSupabaseClient(
+      { data: makeSubjectRow() }, // getById
+      { data: week4Visit }, // visits select (target visit)
+      { data: { id: 'template-uuid' } }, // visit_templates lookup
+      { data: [baselineItem, week4Item] }, // visit_template_items
+      { data: [baselineVisit, week4Visit] }, // visits (all)
+      { data: { id: 'exception-uuid' } }, // visit_sequence_exceptions lookup: open exception
+      { data: null }, // visits update (Step 1 — date field only)
+      { data: null }, // visit_history insert
+      { data: null }, // calendar_events select (existing check)
+      { data: null }, // calendar_events insert
+      { data: null }, // subject_timeline insert
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await SubjectService.completeVisit(
+      SUBJECT_ID,
+      VISIT_ID,
+      COMPLETE_INPUT,
+      makeCtx(),
+    );
+
+    expect(result.status).toBe('completed');
+    expect(ChartService.ensureChartForCompletedVisit).toHaveBeenCalledWith(
+      VISIT_ID,
+      SUBJECT_ID,
+      'completed',
+      expect.anything(),
+    );
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'visit.completed',
+        new_value: expect.objectContaining({ sequence_exception: true }),
+      }),
+    );
   });
 
   it('completes a non-Baseline visit and writes an audit log + timeline event when unlocked', async () => {

@@ -3,7 +3,12 @@ import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { VisitTemplateService } from '@/services/visit-templates/VisitTemplateService';
 import { FileService } from '@/services/files/FileService';
-import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
+import {
+  NotFoundError,
+  DatabaseError,
+  BusinessRuleError,
+  databaseWriteError,
+} from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 import type { StudyDraft, Study } from '@/types/studies';
 import type { FinalizeAiDraftSchema } from '@/lib/utils/validation';
@@ -188,7 +193,7 @@ export const AIDraftService = {
       .single();
 
     if (studyError || !studyRow) {
-      throw new DatabaseError(studyError?.message ?? 'Failed to create study from AI draft');
+      throw databaseWriteError(studyError, 'Failed to create study from AI draft');
     }
 
     const study = studyRow as Study;

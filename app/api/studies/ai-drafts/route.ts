@@ -2,7 +2,7 @@ import { type NextRequest } from 'next/server';
 import { resolveAuthContext } from '@/lib/api/middleware';
 import { successResponse, errorResponse } from '@/lib/api/response';
 import { AIDraftService } from '@/services/studies/AIDraftService';
-import { PermissionDeniedError } from '@/lib/api/errors';
+import { PermissionDeniedError, ConflictError } from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25MB
@@ -33,6 +33,9 @@ export async function POST(request: NextRequest) {
     });
     return successResponse({ draft }, 'Protocol uploaded — AI extraction in progress', 201);
   } catch (error) {
+    if (error instanceof ConflictError) {
+      return errorResponse('CONFLICT', 409, { message: error.message });
+    }
     if (error instanceof PermissionDeniedError) return errorResponse('FORBIDDEN', 403);
     logger.error('POST /api/studies/ai-drafts failed', {
       error: error instanceof Error ? error.message : String(error),
