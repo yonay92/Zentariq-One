@@ -180,6 +180,9 @@ export const CompanyService = {
       'override_do_not_contact',
       'reopen_recruitment_tasks',
       'reopen_chart',
+      // Migration 039 (owner decision M4-D5): visit sequence exceptions are a
+      // conscious per-role grant, like reopen_visit.
+      'override_visit_sequence',
     ]);
     const adminPerms = Array.from(permMap.entries())
       .filter(([key]) => !ADMIN_EXCLUDED_PERMISSIONS.has(key))

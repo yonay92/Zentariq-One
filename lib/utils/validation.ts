@@ -339,6 +339,19 @@ export const reopenVisitSchema = z.object({
 
 export type ReopenVisitSchema = z.infer<typeof reopenVisitSchema>;
 
+// Same bounds as the database CHECK on visit_sequence_exceptions.reason (039).
+export const authorizeVisitSequenceExceptionSchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(10, 'Explain why this visit may be completed out of sequence (at least 10 characters)')
+    .max(2000, 'The reason must be 2000 characters or fewer'),
+});
+
+export type AuthorizeVisitSequenceExceptionSchema = z.infer<
+  typeof authorizeVisitSequenceExceptionSchema
+>;
+
 export const createUnscheduledVisitSchema = z.object({
   visit_name: z.string().min(1, 'Visit name is required').max(200).trim(),
   target_date: z.string().date(),

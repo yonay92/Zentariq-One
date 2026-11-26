@@ -68,6 +68,7 @@ export type PermissionKey =
   | 'force_archive_study'
   | 'force_archive_site'
   | 'reopen_visit'
+  | 'override_visit_sequence'
   | 'view_subject_phi'
   | 'edit_subject_phi'
   | 'view_leads'

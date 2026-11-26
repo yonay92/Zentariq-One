@@ -3,7 +3,7 @@ import { resolveAuthContext } from '@/lib/api/middleware';
 import { successResponse, errorResponse } from '@/lib/api/response';
 import { createStudySchema } from '@/lib/utils/validation';
 import { StudyService, type StudyListFilters } from '@/services/studies/StudyService';
-import { PermissionDeniedError } from '@/lib/api/errors';
+import { PermissionDeniedError, ConflictError } from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 import type { StudyStatus } from '@/types/studies';
 
@@ -53,6 +53,9 @@ export async function POST(request: NextRequest) {
     const study = await StudyService.create(input, { user: auth.user, company: auth.company });
     return successResponse(study, 'Study created', 201);
   } catch (error) {
+    if (error instanceof ConflictError) {
+      return errorResponse('CONFLICT', 409, { message: error.message });
+    }
     if (error instanceof PermissionDeniedError) return errorResponse('FORBIDDEN', 403);
     logger.error('POST /api/studies failed', {
       error: error instanceof Error ? error.message : String(error),

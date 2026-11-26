@@ -3,7 +3,12 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { VisitService } from '@/services/visits/VisitService';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
-import { PermissionDeniedError, BusinessRuleError, NotFoundError } from '@/lib/api/errors';
+import {
+  PermissionDeniedError,
+  BusinessRuleError,
+  NotFoundError,
+  ConflictError,
+} from '@/lib/api/errors';
 
 vi.mock('@/services/audit/AuditService', () => ({
   AuditService: { log: vi.fn() },
@@ -760,5 +765,158 @@ describe('VisitService.listVisitNotes', () => {
     expect(notesStub.eq).toHaveBeenCalledWith('visit_id', VISIT_ID);
     expect(notesStub.eq).toHaveBeenCalledWith('company_id', COMPANY_ID);
     expect(notesStub.order).toHaveBeenCalledWith('created_at', { ascending: false });
+  });
+});
+
+// Owner decision M4-D5 / migration 039: authorized visit sequence exceptions.
+describe('VisitService.authorizeSequenceException', () => {
+  const INPUT = { reason: '  Screening performed at the partner site on the same day  ' };
+  const REASON = 'Screening performed at the partner site on the same day';
+
+  it('requires override_visit_sequence', async () => {
+    const spy = vi
+      .spyOn(PermissionService, 'requirePermission')
+      .mockRejectedValue(new PermissionDeniedError('override_visit_sequence'));
+
+    await expect(
+      VisitService.authorizeSequenceException(SUBJECT_ID, VISIT_ID, INPUT, makeCtx()),
+    ).rejects.toThrow(PermissionDeniedError);
+    expect(spy).toHaveBeenCalledWith(USER_ID, 'override_visit_sequence');
+    expect(createServerSupabaseClient).not.toHaveBeenCalled();
+  });
+
+  it('throws NotFoundError when the visit is not visible', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(makeSupabaseClient({ data: null }));
+
+    await expect(
+      VisitService.authorizeSequenceException(SUBJECT_ID, VISIT_ID, INPUT, makeCtx()),
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it('refuses a visit that is no longer open', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: makeVisit({ status: 'completed' }) }),
+    );
+
+    await expect(
+      VisitService.authorizeSequenceException(SUBJECT_ID, VISIT_ID, INPUT, makeCtx()),
+    ).rejects.toThrow(BusinessRuleError);
+  });
+
+  it('maps the database rule "not blocked" (23514) to ConflictError', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient(
+        { data: makeVisit({ status: 'in_progress' }) },
+        {
+          data: null,
+          error: {
+            code: '23514',
+            message: 'visit_sequence_exceptions: the visit is not blocked by earlier visits',
+          },
+        },
+      ),
+    );
+
+    await expect(
+      VisitService.authorizeSequenceException(SUBJECT_ID, VISIT_ID, INPUT, makeCtx()),
+    ).rejects.toThrow('The visit is not blocked by earlier visits.');
+    expect(AuditService.log).not.toHaveBeenCalled();
+  });
+
+  it('maps a second open exception (23505) to ConflictError', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient(
+        { data: makeVisit({ status: 'in_progress' }) },
+        { data: null, error: { code: '23505', message: 'duplicate key value' } },
+      ),
+    );
+
+    await expect(
+      VisitService.authorizeSequenceException(SUBJECT_ID, VISIT_ID, INPUT, makeCtx()),
+    ).rejects.toThrow(ConflictError);
+  });
+
+  it('records the exception without client-supplied attribution, then writes timeline and audit', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    const visit = makeVisit({ status: 'in_progress' });
+    const stored = {
+      id: 'exception-uuid',
+      company_id: COMPANY_ID,
+      site_id: SITE_ID,
+      subject_id: SUBJECT_ID,
+      visit_id: VISIT_ID,
+      reason: REASON,
+      blocked_by: ['Screening'],
+      authorized_by: USER_ID,
+      authorized_at: '2026-11-21T00:00:00Z',
+      consumed_at: null,
+      consumed_status: null,
+    };
+    const client = makeSupabaseClient(
+      { data: visit }, // getVisitOrThrow
+      { data: null }, // visit_sequence_exceptions insert (no RETURNING)
+      { data: stored }, // read back
+      { data: null }, // subject_timeline insert
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await VisitService.authorizeSequenceException(
+      SUBJECT_ID,
+      VISIT_ID,
+      INPUT,
+      makeCtx(),
+    );
+
+    expect(result.blocked_by).toEqual(['Screening']);
+    const from = (client as unknown as { from: ReturnType<typeof vi.fn> }).from;
+    expect(from.mock.calls.map((c) => c[0])).toEqual([
+      'visits',
+      'visit_sequence_exceptions',
+      'visit_sequence_exceptions',
+      'subject_timeline',
+    ]);
+    const insertStub = from.mock.results[1]?.value as { insert: ReturnType<typeof vi.fn> };
+    const row = insertStub.insert.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(row).toMatchObject({
+      company_id: COMPANY_ID,
+      site_id: SITE_ID,
+      subject_id: SUBJECT_ID,
+      visit_id: VISIT_ID,
+      reason: REASON,
+    });
+    expect(row).not.toHaveProperty('authorized_by');
+    expect(row).not.toHaveProperty('blocked_by');
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'visit.sequence_exception_authorized',
+        record_type: 'visit_sequence_exceptions',
+        site_id: SITE_ID,
+        new_value: { visit_id: VISIT_ID, reason: REASON, blocked_by: ['Screening'] },
+      }),
+    );
+  });
+
+  it('still succeeds (blocked_by null) when the caller cannot read the row back', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient(
+        { data: makeVisit({ status: 'scheduled' }) },
+        { data: null },
+        { data: null },
+        { data: null },
+      ),
+    );
+
+    const result = await VisitService.authorizeSequenceException(
+      SUBJECT_ID,
+      VISIT_ID,
+      INPUT,
+      makeCtx(),
+    );
+    expect(result).toMatchObject({ visit_id: VISIT_ID, reason: REASON, blocked_by: null });
   });
 });

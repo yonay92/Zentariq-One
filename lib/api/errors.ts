@@ -71,6 +71,38 @@ export class ConflictError extends AppError {
   }
 }
 
+/**
+ * PostgreSQL check_violation. Migration 039 raises it when a write breaks a
+ * workflow rule (status transition, visit sequence, visit window,
+ * creation precondition); CHECK constraints raise it too.
+ */
+export const CHECK_VIOLATION_SQLSTATE = '23514';
+
+const WORKFLOW_RULE_MESSAGE =
+  /^(subjects|visits|charts|leads|studies|visit_templates|visit_template_items|visit_sequence_exceptions): (.+)$/;
+
+/**
+ * Error for a failed write on a workflow-protected table. A check violation
+ * becomes a ConflictError (HTTP 409) with the rule text from migration 039 —
+ * those texts name the rule only, never other records — or a generic message
+ * for other CHECK constraints. Anything else stays a DatabaseError.
+ */
+export function databaseWriteError(
+  error: { code?: string; message?: string } | null | undefined,
+  fallbackMessage: string,
+): AppError {
+  if (error?.code === CHECK_VIOLATION_SQLSTATE) {
+    const rule = WORKFLOW_RULE_MESSAGE.exec(error.message ?? '');
+    const text = rule?.[2];
+    return new ConflictError(
+      text
+        ? `${text.charAt(0).toUpperCase()}${text.slice(1)}.`
+        : 'This change conflicts with the current state of the record. Refresh and try again.',
+    );
+  }
+  return new DatabaseError(error?.message ?? fallbackMessage);
+}
+
 export class ValidationError extends AppError {
   constructor(
     message: string,

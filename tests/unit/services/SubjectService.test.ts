@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
-import { SubjectService } from '@/services/subjects/SubjectService';
+import {
+  SubjectService,
+  isMissingSequenceExceptionsTable,
+} from '@/services/subjects/SubjectService';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { NotificationService } from '@/services/notifications/NotificationService';
@@ -67,13 +70,25 @@ function queryStub(data: unknown, error: unknown = null) {
     update: vi.fn().mockReturnThis(),
     upsert: vi.fn().mockReturnThis(),
     in: vi.fn().mockReturnThis(),
+    is: vi.fn().mockReturnThis(),
     maybeSingle: vi.fn().mockResolvedValue({ data, error }),
     single: vi.fn().mockResolvedValue({ data, error }),
     then: resolved.then.bind(resolved),
     catch: resolved.catch.bind(resolved),
     finally: resolved.finally.bind(resolved),
   };
-  for (const key of ['select', 'eq', 'or', 'order', 'limit', 'insert', 'update', 'upsert', 'in']) {
+  for (const key of [
+    'select',
+    'eq',
+    'or',
+    'order',
+    'limit',
+    'insert',
+    'update',
+    'upsert',
+    'in',
+    'is',
+  ]) {
     (stub[key] as ReturnType<typeof vi.fn>).mockReturnValue(stub);
   }
   return stub;
@@ -519,12 +534,105 @@ describe('SubjectService.completeBaselineVisit', () => {
       { data: { id: 'template-uuid' } }, // visit_templates lookup
       { data: [screeningItem, baselineItem] }, // visit_template_items
       { data: [screeningVisit, baselineVisit] }, // visits
+      { data: null }, // visit_sequence_exceptions lookup (039): no open exception
     );
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
     await expect(
       SubjectService.completeBaselineVisit(SUBJECT_ID, { baseline_date: BASELINE_DATE }, makeCtx()),
     ).rejects.toThrow(BusinessRuleError);
+  });
+
+  // V1-R1: before migration 039 is applied the exceptions table does not exist.
+  // A locked Baseline must still be refused as a business rule (422), not 500.
+  function lockedBaselineClient(exceptionLookupError: unknown) {
+    const screeningItem = {
+      id: 'item-screening-uuid',
+      template_id: 'template-uuid',
+      visit_name: 'Screening',
+      visit_order: 1,
+      offset_days: -14,
+      window_before: 0,
+      window_after: 0,
+      visit_type: 'scheduled',
+      is_required: true,
+      is_baseline: false,
+    };
+    const baselineItem = { ...makeBaselineItem(), visit_order: 2 };
+    return makeSupabaseClient(
+      {
+        data: {
+          id: SUBJECT_ID,
+          company_id: COMPANY_ID,
+          site_id: SITE_ID,
+          study_id: STUDY_ID,
+          subject_number: '001-001',
+          status: 'screening',
+          baseline_date: null,
+        },
+      }, // getById
+      { data: { id: 'template-uuid' } }, // visit_templates lookup
+      { data: [screeningItem, baselineItem] }, // visit_template_items
+      {
+        data: [
+          {
+            id: 'visit-screening-uuid',
+            visit_template_item_id: screeningItem.id,
+            status: 'scheduled',
+          },
+          {
+            id: 'visit-baseline-uuid',
+            visit_template_item_id: baselineItem.id,
+            status: 'in_progress',
+          },
+        ],
+      }, // visits
+      { data: null, error: exceptionLookupError }, // visit_sequence_exceptions lookup
+    );
+  }
+
+  it.each([
+    {
+      code: 'PGRST205',
+      message: "Could not find the table 'public.visit_sequence_exceptions' in the schema cache",
+    },
+    { code: '42P01', message: 'relation "public.visit_sequence_exceptions" does not exist' },
+  ])(
+    'V1-R1: a locked Baseline stays a BusinessRuleError when the exceptions table is missing ($code)',
+    async (missingTable) => {
+      vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+      vi.spyOn(ChartService, 'ensureChartForCompletedVisit').mockRejectedValue(
+        new Error('must not be reached'),
+      );
+      vi.mocked(createServerSupabaseClient).mockResolvedValue(lockedBaselineClient(missingTable));
+
+      await expect(
+        SubjectService.completeBaselineVisit(
+          SUBJECT_ID,
+          { baseline_date: BASELINE_DATE },
+          makeCtx(),
+        ),
+      ).rejects.toThrow(BusinessRuleError);
+      expect(ChartService.ensureChartForCompletedVisit).not.toHaveBeenCalled();
+    },
+  );
+
+  it('V1-R1: any other exceptions-lookup error on a locked Baseline is still a DatabaseError', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(ChartService, 'ensureChartForCompletedVisit').mockRejectedValue(
+      new Error('must not be reached'),
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      lockedBaselineClient({
+        code: '42501',
+        message: 'permission denied for table visit_sequence_exceptions',
+      }),
+    );
+
+    await expect(
+      SubjectService.completeBaselineVisit(SUBJECT_ID, { baseline_date: BASELINE_DATE }, makeCtx()),
+    ).rejects.toThrow(DatabaseError);
+    expect(ChartService.ensureChartForCompletedVisit).not.toHaveBeenCalled();
   });
 
   it('completes the Baseline visit, records baseline_date, and generates the rest of the schedule', async () => {
@@ -814,12 +922,173 @@ describe('SubjectService.completeVisit', () => {
       { data: { id: 'template-uuid' } }, // visit_templates lookup
       { data: [baselineItem, week4Item] }, // visit_template_items
       { data: [baselineVisit, week4Visit] }, // visits (all)
+      { data: null }, // visit_sequence_exceptions lookup (039): no open exception
     );
     vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
 
     await expect(
       SubjectService.completeVisit(SUBJECT_ID, VISIT_ID, COMPLETE_INPUT, makeCtx()),
     ).rejects.toThrow(BusinessRuleError);
+    expect(ChartService.ensureChartForCompletedVisit).not.toHaveBeenCalled();
+  });
+
+  // V1-R1: Week 4 locked by an uncompleted Baseline; the exceptions lookup
+  // fails with the given error.
+  function lockedWeek4Client(exceptionLookupError: unknown) {
+    const week4Item = {
+      id: 'item-week4',
+      template_id: 'template-uuid',
+      visit_name: 'Week 4',
+      visit_order: 2,
+      is_required: true,
+      is_baseline: false,
+    };
+    const baselineItem = {
+      id: 'item-baseline',
+      template_id: 'template-uuid',
+      visit_name: 'Baseline',
+      visit_order: 1,
+      is_required: true,
+      is_baseline: true,
+    };
+    const week4Visit = {
+      id: VISIT_ID,
+      status: 'in_progress',
+      visit_template_item_id: week4Item.id,
+    };
+    const baselineVisit = {
+      id: 'visit-baseline',
+      status: 'scheduled',
+      visit_template_item_id: baselineItem.id,
+    };
+    return makeSupabaseClient(
+      { data: makeSubjectRow() }, // getById
+      { data: week4Visit }, // visits select (target visit)
+      { data: { id: 'template-uuid' } }, // visit_templates lookup
+      { data: [baselineItem, week4Item] }, // visit_template_items
+      { data: [baselineVisit, week4Visit] }, // visits (all)
+      { data: null, error: exceptionLookupError }, // visit_sequence_exceptions lookup
+    );
+  }
+
+  // Before migration 039 is applied the table does not exist: the locked visit
+  // must still be refused as a business rule (HTTP 422), never a 500.
+  it.each([
+    {
+      code: 'PGRST205',
+      message: "Could not find the table 'public.visit_sequence_exceptions' in the schema cache",
+    },
+    { code: '42P01', message: 'relation "visit_sequence_exceptions" does not exist' },
+  ])(
+    'V1-R1: a locked visit stays a BusinessRuleError when the exceptions table is missing ($code)',
+    async (missingTable) => {
+      vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+      vi.spyOn(ChartService, 'ensureChartForCompletedVisit').mockRejectedValue(
+        new Error('must not be reached'),
+      );
+      vi.mocked(createServerSupabaseClient).mockResolvedValue(lockedWeek4Client(missingTable));
+
+      await expect(
+        SubjectService.completeVisit(SUBJECT_ID, VISIT_ID, COMPLETE_INPUT, makeCtx()),
+      ).rejects.toThrow(BusinessRuleError);
+      expect(ChartService.ensureChartForCompletedVisit).not.toHaveBeenCalled();
+    },
+  );
+
+  // Only a missing exceptions table is tolerated: permission, connection,
+  // query errors and missing OTHER tables still fail as DatabaseError (500).
+  it.each([
+    { code: '42501', message: 'permission denied for table visit_sequence_exceptions' },
+    { code: 'PGRST301', message: 'JWT expired' },
+    { code: 'PGRST205', message: "Could not find the table 'public.visits' in the schema cache" },
+    { code: '42P01', message: 'relation "public.visit_template_items" does not exist' },
+    { code: '42703', message: 'column visit_sequence_exceptions.consumed_at does not exist' },
+    { message: 'TypeError: fetch failed' },
+  ])(
+    'V1-R1: an unexpected exceptions-lookup error is not silenced ($code $message)',
+    async (unexpected) => {
+      vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+      vi.spyOn(ChartService, 'ensureChartForCompletedVisit').mockRejectedValue(
+        new Error('must not be reached'),
+      );
+      vi.mocked(createServerSupabaseClient).mockResolvedValue(lockedWeek4Client(unexpected));
+
+      await expect(
+        SubjectService.completeVisit(SUBJECT_ID, VISIT_ID, COMPLETE_INPUT, makeCtx()),
+      ).rejects.toThrow(DatabaseError);
+      expect(ChartService.ensureChartForCompletedVisit).not.toHaveBeenCalled();
+    },
+  );
+
+  // Owner decision M4-D5 (039): an open, authorized sequence exception lets a
+  // locked visit be completed; the database consumes it inside the RPC.
+  it('completes a locked visit when an open sequence exception exists, and audits its use', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+
+    const baselineItem = {
+      id: 'item-baseline',
+      template_id: 'template-uuid',
+      visit_name: 'Baseline',
+      visit_order: 1,
+      is_required: true,
+      is_baseline: true,
+    };
+    const week4Item = {
+      id: 'item-week4',
+      template_id: 'template-uuid',
+      visit_name: 'Week 4',
+      visit_order: 2,
+      is_required: true,
+      is_baseline: false,
+    };
+    const week4Visit = {
+      id: VISIT_ID,
+      status: 'in_progress',
+      visit_name: 'Week 4',
+      visit_template_item_id: week4Item.id,
+    };
+    const baselineVisit = {
+      id: 'visit-baseline',
+      status: 'scheduled', // still pending: Week 4 is locked
+      visit_template_item_id: baselineItem.id,
+    };
+    mockEnsureChart({ ...week4Visit, status: 'completed' });
+
+    const client = makeSupabaseClient(
+      { data: makeSubjectRow() }, // getById
+      { data: week4Visit }, // visits select (target visit)
+      { data: { id: 'template-uuid' } }, // visit_templates lookup
+      { data: [baselineItem, week4Item] }, // visit_template_items
+      { data: [baselineVisit, week4Visit] }, // visits (all)
+      { data: { id: 'exception-uuid' } }, // visit_sequence_exceptions lookup: open exception
+      { data: null }, // visits update (Step 1 — date field only)
+      { data: null }, // visit_history insert
+      { data: null }, // calendar_events select (existing check)
+      { data: null }, // calendar_events insert
+      { data: null }, // subject_timeline insert
+    );
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    const result = await SubjectService.completeVisit(
+      SUBJECT_ID,
+      VISIT_ID,
+      COMPLETE_INPUT,
+      makeCtx(),
+    );
+
+    expect(result.status).toBe('completed');
+    expect(ChartService.ensureChartForCompletedVisit).toHaveBeenCalledWith(
+      VISIT_ID,
+      SUBJECT_ID,
+      'completed',
+      expect.anything(),
+    );
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'visit.completed',
+        new_value: expect.objectContaining({ sequence_exception: true }),
+      }),
+    );
   });
 
   it('completes a non-Baseline visit and writes an audit log + timeline event when unlocked', async () => {
@@ -2021,5 +2290,38 @@ describe('SubjectService.update', () => {
       SubjectService.update(SUBJECT_ID, { end_of_study_date: '2026-03-01' }, makeCtx()),
     ).rejects.toThrow(DatabaseError);
     expect(AuditService.log).not.toHaveBeenCalled();
+  });
+});
+
+// V1-R1: the only error treated as "no open sequence exception" is the
+// exceptions table itself being absent (migration 039 not applied yet).
+describe('isMissingSequenceExceptionsTable', () => {
+  it.each([
+    {
+      code: 'PGRST205',
+      message: "Could not find the table 'public.visit_sequence_exceptions' in the schema cache",
+    },
+    { code: '42P01', message: 'relation "visit_sequence_exceptions" does not exist' },
+    { code: '42P01', message: 'relation "public.visit_sequence_exceptions" does not exist' },
+  ])('is true for a missing visit_sequence_exceptions table ($code: $message)', (error) => {
+    expect(isMissingSequenceExceptionsTable(error)).toBe(true);
+  });
+
+  it.each([
+    null,
+    undefined,
+    {},
+    { code: 'PGRST205', message: "Could not find the table 'public.visits' in the schema cache" },
+    {
+      code: '42P01',
+      message: 'relation "public.visit_sequence_exceptions_archive" does not exist',
+    },
+    { code: '42P01' },
+    { code: '42501', message: 'permission denied for table visit_sequence_exceptions' },
+    { code: '42703', message: 'column visit_sequence_exceptions.consumed_at does not exist' },
+    { code: 'PGRST116', message: 'visit_sequence_exceptions: multiple rows returned' },
+    { message: "Could not find the table 'public.visit_sequence_exceptions' in the schema cache" },
+  ])('is false for anything else (%o)', (error) => {
+    expect(isMissingSequenceExceptionsTable(error)).toBe(false);
   });
 });

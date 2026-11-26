@@ -187,6 +187,11 @@ visits
 - updated_at timestamptz default now()
 ```
 
+Unique index `uq_visits_subject_template_item (subject_id, visit_template_item_id)
+WHERE visit_template_item_id IS NOT NULL` (migration 039): one visit per subject
+and template visit, cancelled visits included. Visit identity, dates and window
+rules for Data API writes: BUSINESS_RULES_04 → Visit Integrity.
+
 ### Visit Types
 
 - scheduled
@@ -218,6 +223,60 @@ visit_history
 - changed_at timestamptz default now()
 - reason text
 ```
+
+---
+
+## 9a. Table: visit_sequence_exceptions (migration 039)
+
+Authorized exceptions to the visit sequence (BUSINESS_RULES_04 → Sequence
+Exceptions).
+
+```sql
+visit_sequence_exceptions
+- id uuid primary key
+- company_id uuid not null references companies(id)
+- site_id uuid not null            -- (site_id, company_id) references sites
+- subject_id uuid not null         -- (subject_id, company_id) references subjects, cascade
+- visit_id uuid not null           -- (visit_id, company_id) references visits, cascade
+- reason text not null             -- 10–2000 characters
+- blocked_by jsonb not null        -- required visits pending when recorded (derived)
+- authorized_by uuid               -- derived from the session (038 attribution trigger)
+- authorized_at timestamptz        -- derived, now()
+- consumed_at timestamptz          -- set by the completion that closes it
+- consumed_status text             -- completed | out_of_window
+```
+
+### Rule
+
+- One open exception per visit (partial unique index on `visit_id` where
+  `consumed_at is null`).
+- The visit must be open and actually blocked; subject and site must match
+  the visit. The insert locks the visit row, so it serializes with a
+  concurrent completion.
+- `authenticated`: SELECT (view_visits + site access) and INSERT
+  (override_visit_sequence + site access) only. No UPDATE or DELETE; a
+  recorded exception is immutable for every role except the closing update
+  made by the completion.
+
+## 9b. Schema `private` (migration 039)
+
+```sql
+private.workflow_transitions
+- entity text            -- subjects | visits | charts | visit_templates | leads
+- from_status text
+- to_status text
+- required_permission text references permissions(key)
+- enforcement text       -- enforced | reference (lead pipeline map, documentation only)
+- note text
+- primary key (entity, from_status, to_status)
+```
+
+Plus the SECURITY DEFINER helpers used by the workflow triggers
+(`subject_creation_blocker`, `visit_sequence_blocked_by`,
+`visit_sequence_gate`, `study_has_approved_template`, `study_has_subjects`,
+`template_is_draft`, `visit_is_done`, `subject_baseline_matches`,
+`visit_write_blocker`, `transition_permission`) and `check_transition`. Not exposed by the Data API (docs/SECURITY.md → The
+`private` schema).
 
 ---
 

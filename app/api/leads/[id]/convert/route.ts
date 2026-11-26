@@ -8,6 +8,7 @@ import {
   NotFoundError,
   BusinessRuleError,
   DuplicateRecordError,
+  ConflictError,
 } from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 
@@ -32,6 +33,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     });
     return successResponse(result, 'Lead converted to Subject');
   } catch (error) {
+    if (error instanceof ConflictError) {
+      return errorResponse('CONFLICT', 409, { message: error.message });
+    }
     if (error instanceof PermissionDeniedError) return errorResponse('FORBIDDEN', 403);
     if (error instanceof NotFoundError) return errorResponse('NOT_FOUND', 404);
     if (error instanceof DuplicateRecordError) {

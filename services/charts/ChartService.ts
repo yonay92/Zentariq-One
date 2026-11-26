@@ -5,7 +5,12 @@ import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
 import { TaskService } from '@/services/tasks/TaskService';
 import { logger } from '@/lib/logger';
-import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
+import {
+  NotFoundError,
+  DatabaseError,
+  BusinessRuleError,
+  databaseWriteError,
+} from '@/lib/api/errors';
 import type {
   Chart,
   ChartStatus,
@@ -228,7 +233,7 @@ async function writeChartTransition(
     .select(CHART_COLUMNS)
     .single();
 
-  if (error || !updated) throw new DatabaseError(error?.message ?? 'Failed to update chart');
+  if (error || !updated) throw databaseWriteError(error, 'Failed to update chart');
 
   await supabase.from('chart_history').insert({
     company_id: ctx.company.id,
@@ -331,7 +336,10 @@ async function upsertChartMetrics(
 // complete_visit_with_chart) back to this codebase's normal AppError family,
 // so callers see the exact same error shape regardless of whether the
 // failure came from a plain guard check or the DB-level race-safe recheck.
-function mapCompleteVisitRpcError(message: string): never {
+// A 039 workflow rule raised inside the RPC (visit sequence, visit window)
+// arrives as SQLSTATE 23514 and becomes a 409 ConflictError.
+function mapCompleteVisitRpcError(error: { message: string; code?: string }): never {
+  const { message } = error;
   if (message.startsWith('VISIT_NOT_FOUND') || message.startsWith('VISIT_OWNERSHIP_MISMATCH')) {
     throw new NotFoundError('Visit');
   }
@@ -340,7 +348,7 @@ function mapCompleteVisitRpcError(message: string): never {
       'This visit was already completed by another request. Please refresh and try again.',
     );
   }
-  throw new DatabaseError(message);
+  throw databaseWriteError(error, message);
 }
 
 export const ChartService = {
@@ -369,7 +377,7 @@ export const ChartService = {
       p_new_status: newStatus,
     });
 
-    if (error) mapCompleteVisitRpcError(error.message);
+    if (error) mapCompleteVisitRpcError(error);
     if (!data) throw new DatabaseError('complete_visit_with_chart returned no data');
 
     const result = data as {

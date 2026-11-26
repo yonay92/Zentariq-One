@@ -1,7 +1,14 @@
+import { randomUUID } from 'crypto';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PermissionService } from '@/services/permissions/PermissionService';
 import { AuditService } from '@/services/audit/AuditService';
-import { NotFoundError, DatabaseError, BusinessRuleError } from '@/lib/api/errors';
+import {
+  NotFoundError,
+  DatabaseError,
+  BusinessRuleError,
+  ConflictError,
+  databaseWriteError,
+} from '@/lib/api/errors';
 import { logger } from '@/lib/logger';
 import type {
   RescheduleVisitInput,
@@ -9,6 +16,8 @@ import type {
   ReopenVisitInput,
   CreateUnscheduledVisitInput,
   VisitNote,
+  AuthorizeVisitSequenceExceptionInput,
+  VisitSequenceException,
 } from '@/types/visits';
 import type { Visit } from '@/types/subjects';
 import type { CalendarEvent, ListCalendarEventsFilters } from '@/types/calendar';
@@ -19,6 +28,8 @@ const VISIT_COLUMNS =
 const CALENDAR_EVENT_COLUMNS =
   'id, company_id, site_id, event_type, title, description, start_datetime, end_datetime, related_record_type, related_record_id, status, created_by, created_at, updated_at';
 const VISIT_NOTE_COLUMNS = 'id, company_id, visit_id, note, created_by, created_at';
+const SEQUENCE_EXCEPTION_COLUMNS =
+  'id, company_id, site_id, subject_id, visit_id, reason, blocked_by, authorized_by, authorized_at, consumed_at, consumed_status';
 
 async function getVisitOrThrow(
   subjectId: string,
@@ -54,7 +65,7 @@ async function writeVisitTransition(
     .select(VISIT_COLUMNS)
     .single();
 
-  if (error || !updated) throw new DatabaseError(error?.message ?? 'Failed to update visit');
+  if (error || !updated) throw databaseWriteError(error, 'Failed to update visit');
 
   // GAP-DUP-01 three-way write, same pattern as subject_status_history /
   // subject_timeline / audit_logs for subject status changes.
@@ -413,6 +424,100 @@ export const VisitService = {
     return updated;
   },
 
+  // Owner decision M4-D5 / migration 039: an authorized user may record a
+  // justified exception so that ONE completion of this visit may proceed
+  // although required earlier visits are not done. The database decides
+  // whether the visit is actually blocked (and records which visits block
+  // it), derives the author and time, allows one open exception per visit
+  // and consumes it atomically when the visit is completed. The application
+  // writes the timeline and audit entries (Clinical Research Domain Rules).
+  async authorizeSequenceException(
+    subjectId: string,
+    visitId: string,
+    input: AuthorizeVisitSequenceExceptionInput,
+    ctx: RequestContext,
+  ): Promise<VisitSequenceException> {
+    await PermissionService.requirePermission(ctx.user.id, 'override_visit_sequence');
+
+    const visit = await getVisitOrThrow(subjectId, visitId, ctx);
+    if (!['scheduled', 'confirmed', 'in_progress'].includes(visit.status)) {
+      throw new BusinessRuleError(
+        `A sequence exception can only be recorded for an open visit (current status: ${visit.status})`,
+      );
+    }
+
+    const reason = input.reason.trim();
+    const supabase = await createServerSupabaseClient();
+    // Insert without RETURNING: the row is read back separately, so a caller
+    // whose SELECT policy would hide it still gets a clear result (038 lesson).
+    const id = randomUUID();
+    const { error } = await supabase.from('visit_sequence_exceptions').insert({
+      id,
+      company_id: ctx.company.id,
+      site_id: visit.site_id,
+      subject_id: visit.subject_id,
+      visit_id: visit.id,
+      reason,
+    });
+    if (error) {
+      if (error.code === '23505') {
+        throw new ConflictError(
+          'This visit already has an open sequence exception. Complete the visit or ask an administrator to review it.',
+        );
+      }
+      throw databaseWriteError(error, 'Failed to record the sequence exception');
+    }
+
+    const { data: stored } = await supabase
+      .from('visit_sequence_exceptions')
+      .select(SEQUENCE_EXCEPTION_COLUMNS)
+      .eq('id', id)
+      .eq('company_id', ctx.company.id)
+      .maybeSingle();
+    const exception: VisitSequenceException = stored
+      ? (stored as VisitSequenceException)
+      : {
+          id,
+          company_id: ctx.company.id,
+          site_id: visit.site_id,
+          subject_id: visit.subject_id,
+          visit_id: visit.id,
+          reason,
+          blocked_by: null,
+          authorized_by: ctx.user.id,
+          authorized_at: null,
+          consumed_at: null,
+          consumed_status: null,
+        };
+
+    await addSubjectTimelineEvent(
+      visit.subject_id,
+      ctx.company.id,
+      'visit_sequence_exception',
+      `Sequence exception recorded for ${visit.visit_name}: ${reason}`,
+      ctx.user.id,
+      visit.id,
+    );
+
+    await AuditService.log({
+      company_id: ctx.company.id,
+      site_id: visit.site_id,
+      user_id: ctx.user.id,
+      action: 'visit.sequence_exception_authorized',
+      module: 'subjects',
+      record_type: 'visit_sequence_exceptions',
+      record_id: id,
+      old_value: null,
+      new_value: {
+        visit_id: visit.id,
+        reason,
+        blocked_by: exception.blocked_by,
+      },
+    });
+
+    return exception;
+  },
+
   async createUnscheduledVisit(
     subjectId: string,
     input: CreateUnscheduledVisitInput,
@@ -443,7 +548,7 @@ export const VisitService = {
       .single();
 
     if (error || !data) {
-      throw new DatabaseError(error?.message ?? 'Failed to create unscheduled visit');
+      throw databaseWriteError(error, 'Failed to create unscheduled visit');
     }
 
     const visit = data as Visit;
