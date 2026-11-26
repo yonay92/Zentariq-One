@@ -105,8 +105,25 @@ async function hasOpenSequenceException(visitId: string, companyId: string): Pro
     .eq('company_id', companyId)
     .is('consumed_at', null)
     .maybeSingle();
-  if (error) throw new DatabaseError(error.message);
+  if (error) {
+    // V1-R1: on a database without migration 039 the table does not exist, so
+    // no exception can exist either; the visit stays locked (422) as before.
+    if (isMissingSequenceExceptionsTable(error)) return false;
+    throw new DatabaseError(error.message);
+  }
   return data !== null;
+}
+
+// True only when the error says that visit_sequence_exceptions itself does
+// not exist: PostgREST PGRST205 ("Could not find the table
+// 'public.visit_sequence_exceptions' in the schema cache") or PostgreSQL
+// 42P01 (undefined_table). Any other error, including those codes for another
+// relation, is not a missing-039 signal and must not be silenced.
+export function isMissingSequenceExceptionsTable(
+  error: { code?: string; message?: string } | null | undefined,
+): boolean {
+  if (error?.code !== 'PGRST205' && error?.code !== '42P01') return false;
+  return /\bvisit_sequence_exceptions\b/.test(error.message ?? '');
 }
 
 function addDaysToDateString(dateStr: string, days: number): string {
