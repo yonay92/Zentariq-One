@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { createAdminSupabaseClient } from '@/lib/supabase/admin';
 import { PermissionService } from '@/services/permissions/PermissionService';
@@ -17,6 +18,7 @@ import type {
   MarkEnteredInEdcInput,
   ReopenChartInput,
   ChartComment,
+  AddedChartComment,
   AddChartCommentInput,
   ChartMetrics,
 } from '@/types/charts';
@@ -166,17 +168,38 @@ async function getChartOrThrow(chartId: string, ctx: RequestContext): Promise<Ch
 // permission). charts_select's RLS policy (migration 026) itself requires
 // view_charts, so looking the chart up through the normal session-scoped
 // client would silently re-introduce that dependency. This helper uses the
-// admin client purely to resolve the chart's existence/site_id/company_id
-// for scoping the comment insert and its audit log — never to bypass the
+// admin client purely to read an already-authorized chart's site_id for
+// scoping the comment insert and its audit log — never to bypass the
 // comment_chart permission check itself (callers always call
 // PermissionService.requirePermission(ctx.user.id, 'comment_chart') first),
-// and it re-validates company_id explicitly in TypeScript (defense in
+// and it re-validates company_id explicitly in the query (defense in
 // depth, the same pattern migration 026's RPC uses for its own re-checks)
 // rather than trusting the admin client's lack of RLS.
+//
+// G8 M038 (owner rule A): commenting also requires access to the chart's
+// site (view_all_sites or a user_sites row), still without view_charts. The
+// whole decision is one session-scoped call to can_access_chart (migration
+// 037; the same predicate migration 038's chart_comments_insert policy
+// applies): the chart exists, belongs to the caller's company and sits at a
+// site the caller can access. Missing, other-company and inaccessible-site
+// charts therefore take the same path, the same round trips and the same
+// NotFoundError, so neither the response nor its timing reveals which one it
+// was. Only an authorized chart is then read through the admin client, for
+// the site_id its audit entry needs.
 async function getChartForCommentScopeOrThrow(
   chartId: string,
   ctx: RequestContext,
 ): Promise<Chart> {
+  const session = await createServerSupabaseClient();
+  const { data: accessible, error: accessError } = await session.rpc('can_access_chart', {
+    p_chart_id: chartId,
+  });
+  // 22P02: the id is not a uuid, so no such chart exists.
+  if (accessError && accessError.code !== '22P02') {
+    throw new DatabaseError(accessError.message ?? 'Failed to resolve chart access');
+  }
+  if (accessible !== true) throw new NotFoundError('Chart');
+
   const supabase = createAdminSupabaseClient();
   const { data, error } = await supabase
     .from('charts')
@@ -794,24 +817,37 @@ export const ChartService = {
     chartId: string,
     input: AddChartCommentInput,
     ctx: RequestContext,
-  ): Promise<ChartComment> {
+  ): Promise<AddedChartComment> {
     await PermissionService.requirePermission(ctx.user.id, 'comment_chart');
 
     const chart = await getChartForCommentScopeOrThrow(chartId, ctx);
 
-    const supabase = await createServerSupabaseClient();
-    const { data, error } = await supabase
-      .from('chart_comments')
-      .insert({
-        company_id: ctx.company.id,
-        chart_id: chart.id,
-        comment: input.comment,
-        created_by: ctx.user.id,
-      })
-      .select(CHART_COMMENT_COLUMNS)
-      .single();
+    // R3: no RETURNING. PostgreSQL applies chart_comments_select (which
+    // requires view_charts) to rows returned by an INSERT, so reading the row
+    // back in the same statement would refuse every commenter without
+    // view_charts (42501) and write nothing. The id is generated here so the
+    // response can name the row without reading it.
+    const fields = {
+      id: randomUUID(),
+      company_id: ctx.company.id,
+      chart_id: chart.id,
+      comment: input.comment,
+      created_by: ctx.user.id,
+    };
 
-    if (error || !data) throw new DatabaseError(error?.message ?? 'Failed to add comment');
+    const supabase = await createServerSupabaseClient();
+    const { error } = await supabase.from('chart_comments').insert(fields);
+
+    if (error) {
+      // Narrow, insert-specific mapping. 42501: chart_comments_insert RLS
+      // refused the row (site access or comment_chart revoked after the
+      // checks above, or migration 038's can_access_chart check) — answered
+      // like an inaccessible chart. 23503: the chart was deleted or moved
+      // concurrently. Anything else is unexpected here and stays a
+      // DatabaseError (500; the route never sends its message to the client).
+      if (error.code === '42501' || error.code === '23503') throw new NotFoundError('Chart');
+      throw new DatabaseError(error.message ?? 'Failed to add comment');
+    }
 
     await AuditService.log({
       company_id: ctx.company.id,
@@ -821,10 +857,29 @@ export const ChartService = {
       module: 'charts',
       record_type: 'chart',
       record_id: chart.id,
-      new_value: { comment_id: (data as ChartComment).id },
+      new_value: { comment_id: fields.id },
     });
 
-    return data as ChartComment;
+    // created_at is the database's now(), never the app server's clock. It is
+    // read back under the caller's own RLS (comments are immutable, so this is
+    // the stored row); a caller without view_charts may not read it and gets
+    // null. The comment is already written and audited at this point, so a
+    // failed read-back must not turn into an error the client would retry.
+    const { data: stored, error: readError } = await supabase
+      .from('chart_comments')
+      .select(CHART_COMMENT_COLUMNS)
+      .eq('id', fields.id)
+      .eq('company_id', ctx.company.id)
+      .maybeSingle();
+
+    if (readError) {
+      logger.warn('ChartService.addComment: comment read-back failed', {
+        comment_id: fields.id,
+        error: readError.message,
+      });
+    }
+    if (stored) return stored as ChartComment;
+    return { ...fields, created_at: null };
   },
 
   // Read path intentionally requires view_charts (chart_comments_select's

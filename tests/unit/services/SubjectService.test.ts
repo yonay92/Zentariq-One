@@ -1957,3 +1957,69 @@ describe('SubjectService.listDocuments — baseline characterization', () => {
     expect(result).toEqual([]);
   });
 });
+
+// ── G8 M038 rule B: no direct site/study reassignment ─────────────────────
+// The route strips site_id/study_id (subjects.update.routes.test.ts); these
+// tests pin what the service itself writes. DB-level enforcement once visits
+// exist comes from migration 038's composite FKs and is specified, pending,
+// in tests/integration/subject-reassignment-038.test.ts.
+
+describe('SubjectService.update', () => {
+  const existing = {
+    id: SUBJECT_ID,
+    company_id: COMPANY_ID,
+    site_id: SITE_ID,
+    study_id: STUDY_ID,
+    subject_number: '001-001',
+    status: 'enrolled',
+  };
+
+  it('writes only the fields it is given, scoped to the caller company, and audits them', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(SubjectService, 'getById').mockResolvedValue(existing as never);
+    const client = makeSupabaseClient({ data: { ...existing, initials: 'AB' } });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(client);
+
+    await SubjectService.update(SUBJECT_ID, { initials: 'AB' }, makeCtx());
+
+    const stub = (client as unknown as { from: ReturnType<typeof vi.fn> }).from.mock.results[0]
+      ?.value as { update: ReturnType<typeof vi.fn>; eq: ReturnType<typeof vi.fn> };
+    expect(stub.update).toHaveBeenCalledWith({ initials: 'AB' });
+    expect(stub.update.mock.calls[0]?.[0]).not.toHaveProperty('site_id');
+    expect(stub.update.mock.calls[0]?.[0]).not.toHaveProperty('study_id');
+    expect(stub.eq).toHaveBeenCalledWith('company_id', COMPANY_ID);
+    expect(AuditService.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'subject.updated',
+        site_id: SITE_ID,
+        new_value: { initials: 'AB' },
+      }),
+    );
+  });
+
+  it('requires edit_subject before reading or writing', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockRejectedValue(
+      new PermissionDeniedError('edit_subject'),
+    );
+    const getById = vi.spyOn(SubjectService, 'getById');
+
+    await expect(SubjectService.update(SUBJECT_ID, { initials: 'AB' }, makeCtx())).rejects.toThrow(
+      PermissionDeniedError,
+    );
+    expect(getById).not.toHaveBeenCalled();
+    expect(createServerSupabaseClient).not.toHaveBeenCalled();
+  });
+
+  it('a refused write (e.g. a 038 composite-FK 23503) is not audited as a change', async () => {
+    vi.spyOn(PermissionService, 'requirePermission').mockResolvedValue(undefined);
+    vi.spyOn(SubjectService, 'getById').mockResolvedValue(existing as never);
+    vi.mocked(createServerSupabaseClient).mockResolvedValue(
+      makeSupabaseClient({ data: null, error: { code: '23503', message: 'fk' } }),
+    );
+
+    await expect(
+      SubjectService.update(SUBJECT_ID, { end_of_study_date: '2026-03-01' }, makeCtx()),
+    ).rejects.toThrow(DatabaseError);
+    expect(AuditService.log).not.toHaveBeenCalled();
+  });
+});

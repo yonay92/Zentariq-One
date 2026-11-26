@@ -701,10 +701,17 @@ describe('ChartService — company isolation', () => {
       created_at: '2026-01-01T00:00:00Z',
     };
     const serverTracking = makeTrackingClient(insertedComment);
-    vi.mocked(createServerSupabaseClient).mockResolvedValue(serverTracking.client);
+    // G8 M038: chart access is decided by can_access_chart under the caller's
+    // own session, whose company comes from the database, never the request.
+    const rpc = vi.fn().mockResolvedValue({ data: true, error: null });
+    vi.mocked(createServerSupabaseClient).mockResolvedValue({
+      ...(serverTracking.client as object),
+      rpc,
+    } as never);
 
     await ChartService.addComment('chart-1', { comment: 'Test' }, makeCtx(COMPANY_B));
 
+    expect(rpc).toHaveBeenCalledWith('can_access_chart', { p_chart_id: 'chart-1' });
     const adminCompanyEq = adminTracking.eqCalls.find(([col]) => col === 'company_id');
     expect(adminCompanyEq).toBeDefined();
     expect(adminCompanyEq![1]).toBe(COMPANY_B);
